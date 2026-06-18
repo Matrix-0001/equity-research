@@ -1,0 +1,32 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+.python-version
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.ipynb_checkpoints/
+
+# Data — never commit licensed/raw market data (license + size).
+# Anchored to repo root so it does NOT match the src/equity_research/data/ package.
+/data/
+*.parquet
+*.duckdb
+*.sqlite
+*.csv
+!docs/**/*.csv
+
+# Secrets / API keys
+.env
+*.key
+secrets.*
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

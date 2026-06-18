@@ -1,0 +1,250 @@
+"""SEC EDGAR fundamentals adapter (Lane 1 — free).
+
+Pulls as-reported fundamentals from the SEC's XBRL `companyfacts` API and loads
+them into the vendor-neutral `fundamentals` table, keyed by FILING DATE so the
+point-in-time layer works unchanged.
+
+Why this is point-in-time honest:
+  - Each XBRL fact carries `filed` (the date the filing became public). We use it
+    as `datekey`, so a screen "as of date D" only sees filings filed on/before D.
+  - Values are exactly as reported in each filing (companyfacts returns the figure
+    each filing stated). A later amendment is a *new* row with a later `filed`
+    date, which is correct: it only becomes visible from its own filing date on.
+
+v1 honest limitations (documented, not hidden):
+  - US issuers filing XBRL only (no foreign-private-issuer gaps filled, no pre-XBRL
+    history — reliable from ~2009).
+  - A curated set of us-gaap/dei concepts (below), not every line item.
+  - Concept tags vary across filers; we try a small fallback list per concept and
+    leave the field NULL ("Not estimated") when no candidate is present, rather
+    than guessing.
+
+SEC fair-access: requires a real User-Agent contact (config.sec_user_agent) and
+asks callers to stay under ~10 requests/second.
+"""
+
+from __future__ import annotations
+
+import datetime as dt
+import time
+
+import pandas as pd
+
+from equity_research.config import Config, config
+from equity_research.data import http, storage
+
+# logical field -> (XBRL unit, [(taxonomy, tag) fallback candidates])
+CONCEPTS: dict[str, tuple[str, list[tuple[str, str]]]] = {
+    # Income statement
+    "revenue": ("USD", [
+        ("us-gaap", "RevenueFromContractWithCustomerExcludingAssessedTax"),
+        ("us-gaap", "Revenues"),
+        ("us-gaap", "SalesRevenueNet"),
+    ]),
+    "gross_profit": ("USD", [("us-gaap", "GrossProfit")]),
+    "operating_income": ("USD", [("us-gaap", "OperatingIncomeLoss")]),
+    "net_income": ("USD", [("us-gaap", "NetIncomeLoss")]),
+    "interest_expense": ("USD", [
+        ("us-gaap", "InterestExpense"),
+        ("us-gaap", "InterestExpenseDebt"),
+    ]),
+    "eps_diluted": ("USD/shares", [("us-gaap", "EarningsPerShareDiluted")]),
+    # Balance sheet
+    "total_assets": ("USD", [("us-gaap", "Assets")]),
+    "current_assets": ("USD", [("us-gaap", "AssetsCurrent")]),
+    "total_liabilities": ("USD", [("us-gaap", "Liabilities")]),
+    "current_liabilities": ("USD", [("us-gaap", "LiabilitiesCurrent")]),
+    "total_equity": ("USD", [
+        ("us-gaap", "StockholdersEquity"),
+        ("us-gaap", "StockholdersEquityIncludingPortionAttributableToNoncontrollingInterest"),
+    ]),
+    "cash": ("USD", [
+        ("us-gaap", "CashAndCashEquivalentsAtCarryingValue"),
+        ("us-gaap", "CashCashEquivalentsRestrictedCashAndRestrictedCashEquivalents"),
+    ]),
+    "long_term_debt": ("USD", [
+        ("us-gaap", "LongTermDebtNoncurrent"),
+        ("us-gaap", "LongTermDebt"),
+    ]),
+    # Cash flow
+    "operating_cash_flow": ("USD", [
+        ("us-gaap", "NetCashProvidedByUsedInOperatingActivities"),
+        ("us-gaap", "NetCashProvidedByUsedInOperatingActivitiesContinuingOperations"),
+    ]),
+    "capex": ("USD", [("us-gaap", "PaymentsToAcquirePropertyPlantAndEquipment")]),
+    # Shares (cover-page count; dei first, then us-gaap fallbacks)
+    "shares_outstanding": ("shares", [
+        ("dei", "EntityCommonStockSharesOutstanding"),
+        ("us-gaap", "CommonStockSharesOutstanding"),
+        ("us-gaap", "WeightedAverageNumberOfDilutedSharesOutstanding"),
+    ]),
+}
+
+# Periodic-report forms we keep (annual + quarterly + amendments + foreign).
+KEEP_FORMS = {"10-K", "10-Q", "10-K/A", "10-Q/A", "20-F", "20-F/A", "40-F", "40-F/A"}
+
+_TICKER_MAP_URL = "https://www.sec.gov/files/company_tickers.json"
+_REQUEST_DELAY_S = 0.15  # stay well under SEC's ~10 req/s
+
+
+def _get_json(url: str, cfg: Config) -> dict:
+    return http.get_json(url, cfg.sec_user_agent)
+
+
+def get_cik_map(cfg: Config = config) -> dict[str, int]:
+    """Ticker (upper) -> CIK integer, from the SEC's official mapping file."""
+    data = _get_json(_TICKER_MAP_URL, cfg)
+    return {row["ticker"].upper(): int(row["cik_str"]) for row in data.values()}
+
+
+def fetch_company_facts(cik: int, cfg: Config = config) -> dict:
+    url = f"https://data.sec.gov/api/xbrl/companyfacts/CIK{int(cik):010d}.json"
+    return _get_json(url, cfg)
+
+
+def _pick_value(
+    entries: list[tuple[str | None, str, float | None]],
+    period_end: str,
+    target_days: int,
+) -> float | None:
+    """Choose the right fact among (start, end, val) tuples for one concept.
+
+    Prefers facts ending on `period_end`; for flow items (which carry a `start`),
+    picks the one whose duration is closest to `target_days` (quarter vs year), so
+    a 10-Q's 6-month YTD figure isn't mistaken for the quarterly number.
+    """
+    pool = [t for t in entries if t[1] == period_end]
+    if not pool:
+        usable = [t for t in entries if t[1] <= period_end]
+        if not usable:
+            return None
+        latest = max(t[1] for t in usable)
+        pool = [t for t in usable if t[1] == latest]
+    flows = [t for t in pool if t[0]]
+    if flows:
+        def _dur_err(t: tuple[str | None, str, float | None]) -> int:
+            return abs(
+                (dt.date.fromisoformat(t[1]) - dt.date.fromisoformat(t[0])).days - target_days
+            )
+        return min(flows, key=_dur_err)[2]
+    return pool[0][2]
+
+
+def extract_fundamentals(ticker: str, facts_json: dict) -> pd.DataFrame:
+    """Turn one company's companyfacts JSON into wide rows, one per filing (accn)."""
+    facts_root = facts_json.get("facts", {})
+
+    # accn -> {filed, form, concepts: {logical: [(end, val), ...]}}
+    by_accn: dict[str, dict] = {}
+    for logical, (unit, candidates) in CONCEPTS.items():
+        for taxonomy, tag in candidates:
+            node = facts_root.get(taxonomy, {}).get(tag)
+            if not node:
+                continue
+            entries = node.get("units", {}).get(unit)
+            if not entries:
+                continue
+            for e in entries:
+                accn, filed, end = e.get("accn"), e.get("filed"), e.get("end")
+                if accn is None or filed is None or end is None:
+                    continue
+                rec = by_accn.setdefault(
+                    accn, {"filed": filed, "form": e.get("form"), "concepts": {}}
+                )
+                rec["concepts"].setdefault(logical, []).append(
+                    (e.get("start"), end, e.get("val"))
+                )
+            break  # first matching tag wins for this concept
+
+    rows: list[dict] = []
+    for rec in by_accn.values():
+        if rec["form"] not in KEEP_FORMS:
+            continue
+        concepts = rec["concepts"]
+        # Reporting period end = latest end among financial concepts (exclude the
+        # cover-page share count, whose "as of" date can sit after period end).
+        fin_ends = [
+            end for name, lst in concepts.items() if name != "shares_outstanding"
+            for _s, end, _v in lst
+        ]
+        if not fin_ends:
+            continue
+        period_end = max(fin_ends)
+        # Flow items (income statement, cash flow) report multiple durations ending
+        # on the same date (e.g. a 10-Q carries both the 3-month and the 6-month YTD
+        # figure). Pick the duration matching the filing: ~quarter vs ~year.
+        target_days = 90 if rec["form"].startswith("10-Q") else 365
+
+        row: dict = {
+            "ticker": ticker,
+            "datekey": rec["filed"],
+            "reportperiod": period_end,
+            "form": rec["form"],
+        }
+        for name, lst in concepts.items():
+            if name == "shares_outstanding":
+                row[name] = max(lst, key=lambda x: x[1])[2]  # instant, closest to filing
+            else:
+                row[name] = _pick_value(lst, period_end, target_days)
+        rows.append(row)
+
+    df = pd.DataFrame(rows)
+    if not df.empty:
+        df["datekey"] = pd.to_datetime(df["datekey"])
+        df["reportperiod"] = pd.to_datetime(df["reportperiod"])
+        df = df.sort_values("datekey").reset_index(drop=True)
+    return df
+
+
+def ingest(
+    tickers: list[str],
+    cfg: Config = config,
+    snapshot_date: dt.date | None = None,
+) -> dict:
+    """Fetch + load fundamentals for `tickers` into the `fundamentals` table.
+
+    Returns a summary dict: row count, tickers resolved, and tickers with no CIK
+    or no usable facts (surfaced honestly rather than silently dropped).
+    """
+    snapshot_date = snapshot_date or dt.date.today()
+    cik_map = get_cik_map(cfg)
+
+    frames: list[pd.DataFrame] = []
+    resolved: list[str] = []
+    missing_cik: list[str] = []
+    no_facts: list[str] = []
+
+    for t in tickers:
+        cik = cik_map.get(t.upper())
+        if cik is None:
+            missing_cik.append(t)
+            continue
+        df = extract_fundamentals(t.upper(), fetch_company_facts(cik, cfg))
+        if df.empty:
+            no_facts.append(t)
+        else:
+            frames.append(df)
+            resolved.append(t.upper())
+        time.sleep(_REQUEST_DELAY_S)
+
+    summary = {
+        "rows": 0,
+        "tickers_resolved": resolved,
+        "tickers_missing_cik": missing_cik,
+        "tickers_no_facts": no_facts,
+    }
+    if not frames:
+        return summary
+
+    allf = pd.concat(frames, ignore_index=True)
+    conn = storage.connect(cfg)
+    try:
+        storage.write_snapshot(
+            conn, allf, "fundamentals", source="SEC EDGAR companyfacts",
+            vendor="edgar", snapshot_date=snapshot_date, cfg=cfg,
+        )
+        storage.load_table(conn, allf, "fundamentals")
+    finally:
+        conn.close()
+    summary["rows"] = len(allf)
+    return summary
