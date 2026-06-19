@@ -23,7 +23,19 @@ import sys
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
-PY = sys.executable
+
+
+def _venv_python() -> str:
+    """Prefer the project's OWN venv interpreter, so the script works no matter which python
+    launched it. (Common footgun: running it with a different venv that lacks pytest / the deps.)
+    """
+    for cand in (REPO / ".venv" / "Scripts" / "python.exe", REPO / ".venv" / "bin" / "python"):
+        if cand.exists():
+            return str(cand)
+    return sys.executable
+
+
+PY = _venv_python()
 
 
 def _run(args: list[str], desc: str, check: bool = False) -> bool:
