@@ -87,27 +87,35 @@ def table_exists(conn: duckdb.DuckDBPyConnection, table_name: str) -> bool:
     return row is not None
 
 
-def upsert_by_ticker(
-    conn: duckdb.DuckDBPyConnection, df: pd.DataFrame, table_name: str
+def upsert_by_key(
+    conn: duckdb.DuckDBPyConnection, df: pd.DataFrame, table_name: str, key_col: str = "ticker"
 ) -> None:
-    """Replace-by-ticker upsert: keep rows for other tickers, swap in the new ones.
+    """Replace-by-key upsert: keep rows for other key values, swap in the new ones.
 
-    Lets the universe grow incrementally across pulls (re-pulling AAPL refreshes
-    AAPL without wiping MSFT). Reconciles column drift via pandas concat, so adding
-    new EDGAR concepts later doesn't break the append.
+    Lets a table grow incrementally across pulls (re-pulling one key refreshes it
+    without wiping the others). Reconciles column drift via pandas concat, so adding
+    new fields later doesn't break the append. `key_col` is the identity column
+    (e.g. `ticker` for fundamentals/prices, `series_id` for macro).
     """
     if df.empty:
         return
-    tickers = df["ticker"].unique().tolist()
+    keys = df[key_col].unique().tolist()
     if table_exists(conn, table_name):
-        placeholders = ",".join("?" * len(tickers))
+        placeholders = ",".join("?" * len(keys))
         existing = conn.execute(
-            f"SELECT * FROM {table_name} WHERE ticker NOT IN ({placeholders})", tickers
+            f"SELECT * FROM {table_name} WHERE {key_col} NOT IN ({placeholders})", keys
         ).df()
         combined = pd.concat([existing, df], ignore_index=True)
     else:
         combined = df
     load_table(conn, combined, table_name)
+
+
+def upsert_by_ticker(
+    conn: duckdb.DuckDBPyConnection, df: pd.DataFrame, table_name: str
+) -> None:
+    """Replace-by-ticker upsert (thin wrapper over `upsert_by_key` on the `ticker` column)."""
+    upsert_by_key(conn, df, table_name, key_col="ticker")
 
 
 def latest_snapshot_date(conn: duckdb.DuckDBPyConnection, table_name: str) -> dt.date | None:

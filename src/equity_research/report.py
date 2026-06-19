@@ -119,7 +119,10 @@ def build_security_report(
     rep.confidence_tier = f"{tier.value} (mechanical, from data completeness)"
 
     rep.historical_base_rate = f"{NOT_ESTIMATED} - forward-outcome base rates are a later phase"
-    rep.suggested_role_weight = f"{NOT_ESTIMATED} - portfolio optimizer is v2; not advice"
+    rep.suggested_role_weight = (
+        f"{NOT_ESTIMATED} - a single-name report carries no weight; build a basket via "
+        f"`construct` (risk parity / HRP). Not advice."
+    )
     rep.what_would_change_this = _what_would_change(in_universe, n_metrics, n_flags, has_val, flg)
 
     if use_llm:

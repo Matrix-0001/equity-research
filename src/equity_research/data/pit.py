@@ -26,11 +26,15 @@ import pandas as pd
 ANNUAL_FORMS = ("10-K", "10-K/A", "20-F", "20-F/A", "40-F", "40-F/A")
 
 
-def _ticker_filter(tickers: list[str] | None, params: list) -> str:
-    if not tickers:
+def _in_filter(values: list[str] | None, params: list, col: str = "ticker") -> str:
+    if not values:
         return ""
-    params.extend(tickers)
-    return f" AND ticker IN ({','.join('?' * len(tickers))})"
+    params.extend(values)
+    return f" AND {col} IN ({','.join('?' * len(values))})"
+
+
+def _ticker_filter(tickers: list[str] | None, params: list) -> str:
+    return _in_filter(tickers, params, "ticker")
 
 
 def fundamentals_asof(
@@ -86,6 +90,74 @@ def last_price(
     """Most recent unadjusted close known on/before `as_of` (None if none)."""
     px = prices_asof(conn, as_of, 15, [ticker])
     return None if px.empty else float(px.sort_values("date")["closeunadj"].iloc[-1])
+
+
+def macro_asof(
+    conn: duckdb.DuckDBPyConnection,
+    as_of: dt.date,
+    series_ids: list[str] | None = None,
+) -> pd.DataFrame:
+    """Latest macro value per series KNOWN on `as_of`, using ALFRED vintages (no lookahead).
+
+    For each series we take, per observation date, the vintage whose `realtime_start <= as_of`
+    with the largest realtime_start (the figure in force on `as_of`, not a later revision),
+    then return the most recent observation date whose value had actually been released by
+    `as_of`. One row per series: series_id, date (observation), value, vintage (realtime_start).
+    Series with no value released by `as_of` simply do not appear.
+    """
+    params: list = [as_of]
+    where = "realtime_start <= ?" + _in_filter(series_ids, params, "series_id")
+    return conn.execute(
+        f"""
+        WITH known AS (SELECT * FROM macro WHERE {where}),
+        current_vintage AS (
+            SELECT *, row_number() OVER (
+                PARTITION BY series_id, date ORDER BY realtime_start DESC) AS vrn
+            FROM known
+        ),
+        latest_obs AS (
+            SELECT * EXCLUDE (vrn), row_number() OVER (
+                PARTITION BY series_id ORDER BY date DESC) AS orn
+            FROM current_vintage
+            WHERE vrn = 1 AND value IS NOT NULL AND isfinite(value)
+        )
+        SELECT series_id, date, value, realtime_start AS vintage
+        FROM latest_obs WHERE orn = 1 ORDER BY series_id
+        """,
+        params,
+    ).df()
+
+
+def macro_series_asof(
+    conn: duckdb.DuckDBPyConnection,
+    as_of: dt.date,
+    series_id: str,
+    lookback_days: int | None = None,
+) -> pd.DataFrame:
+    """Vintage-correct macro time series KNOWN on `as_of` -> DataFrame [date, value], date-sorted.
+
+    For each observation date <= `as_of` we take the vintage in force on `as_of` (the latest
+    `realtime_start <= as_of`), so the whole series reflects what was knowable on `as_of`, not
+    later revisions. `lookback_days` optionally restricts to observations after as_of-lookback.
+    """
+    params: list = [series_id, as_of]
+    where = "series_id = ? AND realtime_start <= ?"
+    if lookback_days is not None:
+        params.append(as_of - dt.timedelta(days=lookback_days))
+        where += " AND date > ?"
+    return conn.execute(
+        f"""
+        WITH known AS (SELECT * FROM macro WHERE {where}),
+        current_vintage AS (
+            SELECT *, row_number() OVER (PARTITION BY date ORDER BY realtime_start DESC) AS vrn
+            FROM known
+        )
+        SELECT date, value FROM current_vintage
+        WHERE vrn = 1 AND value IS NOT NULL AND isfinite(value)
+        ORDER BY date
+        """,
+        params,
+    ).df()
 
 
 def annual_history(

@@ -52,8 +52,9 @@ and missing data. It never produces a numeric estimate of its own and never over
 **Phase 0 complete — Lane 1 (free) chosen; Sharadar is the planned upgrade. v1 working:
 factor screen + valuation + accounting-quality flags + full SecurityReport (with optional
 LLM bull/bear) + persistent universe.** Python 3.12 + `.venv` installed. EDGAR + Yahoo adapters
-built and live-validated; **31/31 tests pass** (point-in-time, survivorship-free universe, EDGAR
-flow-duration logic, factor math, flags, valuation, upsert persistence, report assembly, LLM parsing).
+built and live-validated; **64/64 tests pass** (point-in-time, survivorship-free universe, EDGAR
+flow-duration logic, factor math, flags, valuation, upsert persistence, report assembly, LLM parsing,
+v2 portfolio weighting / caps / Kelly, vintage-aware FRED/ALFRED macro, and macro exposure regressions).
 Stack: Python + DuckDB/Parquet.
 
 **Data sources (free, no subscription):**
@@ -70,11 +71,12 @@ the storage / point-in-time / universe / factor layers don't change.
 
 ### Quickstart
 ```
-.venv\Scripts\python -m pytest -q                                     # 31/31
+.venv\Scripts\python -m pytest -q                                     # 64/64
 .venv\Scripts\python -m equity_research.cli pull-sp500 --limit 50     # seed the universe (accumulates)
 .venv\Scripts\python -m equity_research.cli universe                  # what's loaded
 .venv\Scripts\python -m equity_research.cli screen                    # factor ranks, whole universe
 .venv\Scripts\python -m equity_research.cli report AAPL               # full SecurityReport
+.venv\Scripts\python -m equity_research.cli construct --method hrp    # risk-based weights + caps (v2)
 ```
 (Run from the repo root so data lands in `.\data`, which is git-ignored. `pull TICKERS...` and
 `pull-sp500` both ACCUMULATE — re-pulling refreshes a name, others stay.)
@@ -96,6 +98,25 @@ the storage / point-in-time / universe / factor layers don't change.
 - Throughout: missing inputs read **"Not estimated"** with the reason, never a fabricated number
   (e.g. a bank's Altman Z and reverse-DCF correctly refuse rather than mislead).
 
+### What works today (v2, first slice)
+- **`construct [TICKERS...] --method {inverse_variance,risk_parity,hrp}`** turns a basket (explicit
+  names, or the top-N by factor composite) into diversified weights from a point-in-time covariance
+  matrix, then applies a hard **position cap** and a **liquidity cap** (position value vs. ADV).
+  Names with too little history or zero return variance are **dropped and listed**, never imputed.
+  Output shows weights, realized risk contributions, binding caps, and any un-deployable capital.
+- **Fractional-Kelly** is wired to an explicit, user-supplied edge input:
+  `construct --method kelly --edge AAPL=0.06 --edge MSFT=0.04` (or `--edge-file`, plus
+  `--kelly-fraction` / `--max-weight`). Expected EXCESS returns are **your** inputs, echoed back as
+  assumptions and never invented; the result also reports the implied gross Kelly leverage.
+- **Macro (FRED/ALFRED):** `pull-macro` ingests a curated set of rate / inflation / recession series
+  **vintage-aware** (revised series carry ALFRED vintages; non-revised daily rates are stamped as known
+  on their observation date), and `macro` shows the values **known as of a date** -- point-in-time
+  correct. Needs a free `FRED_API_KEY`.
+- **Macro exposures:** `exposures TICKER` regresses the name's periodic returns on changes in the 10Y
+  yield, the 10Y-2Y curve, and the high-yield credit spread (univariate OLS, point-in-time) -- betas
+  with standard errors / t / R^2 / n -- plus a **recession base rate** by NBER (USREC) regime. Measured
+  historical sensitivities and base rates, **never forecasts**; thin/absent samples read "Not estimated".
+
 ### Not built yet
-- FRED/ALFRED macro adapter; v2 portfolio construction (risk parity / fractional-Kelly with caps);
-  v3 validated backtesting; point-in-time index membership (needs Sharadar) for survivorship-free backtests.
+- v2 sector caps (need stored point-in-time sector data -- Lane 1 has none); v3 validated backtesting;
+  point-in-time index membership (needs Sharadar) for survivorship-free backtests.

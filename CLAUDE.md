@@ -20,7 +20,7 @@ surface caveats. It never produces a number of its own and never overrides a com
 ## Stack & environment
 - Python 3.12 at `%LOCALAPPDATA%\Programs\Python\Python312`; project venv at `.venv`.
 - DuckDB + Parquet for local storage (`./data`, git-ignored). pandas/pyarrow.
-- Run tests: `.venv\Scripts\python -m pytest -q`  (currently **31/31 green**).
+- Run tests: `.venv\Scripts\python -m pytest -q`  (currently **64/64 green**).
 - Optional LLM: `pip install -e .[llm]` + `ANTHROPIC_API_KEY` (default model `claude-opus-4-8`,
   override `EQR_LLM_MODEL`). Without it, narratives read "Not estimated".
 
@@ -31,10 +31,16 @@ python -m equity_research.cli pull AAPL MSFT NVDA      # add/refresh specific na
 python -m equity_research.cli universe                 # what's loaded
 python -m equity_research.cli screen                   # factor percentile ranks, whole universe
 python -m equity_research.cli report AAPL              # full SecurityReport (+ optional LLM bull/bear)
+python -m equity_research.cli construct --method hrp   # risk-based weights + position/liquidity caps
+python -m equity_research.cli construct --method kelly --edge AAPL=0.06 --edge MSFT=0.04  # your edges
+python -m equity_research.cli pull-macro               # FRED/ALFRED macro, vintage-aware (needs FRED_API_KEY)
+python -m equity_research.cli macro                    # macro values known as-of a date (no lookahead)
+python -m equity_research.cli exposures AAPL           # rate/curve/credit betas + recession base rate
 ```
 
 ## Architecture (src/equity_research/)
-- `config.py` — all tunable assumptions in one auditable place (universe floors, SEC UA, LLM model).
+- `config.py` — all tunable assumptions in one auditable place (universe floors, SEC UA, FRED key,
+  LLM model, `PortfolioConfig`: covariance/caps/Kelly, `ExposureConfig`: regression freq/lookback/factors).
 - `disclaimer.py` — persistent disclaimer + `SecurityReport` dataclass (fields default to "Not estimated").
 - `data/storage.py` — DuckDB + versioned raw parquet snapshots; `upsert_by_ticker` (persistent universe).
 - `data/http.py` — GET with retry/backoff (env network is intermittently flaky).
@@ -42,16 +48,27 @@ python -m equity_research.cli report AAPL              # full SecurityReport (+ 
   Handles flow-duration (10-Q quarterly vs YTD) and tag migration (multi-candidate, priority-ranked).
 - `data/prices_free.py` — Yahoo chart API → `prices` table (survivorship-biased; documented).
 - `data/reference.py` — current S&P 500 constituents (seed only; not point-in-time membership).
+- `data/fred.py` — FRED/ALFRED macro adapter (Lane 1). Pulls **vintages** (value as known at each
+  date) into the `macro` table, so macro is point-in-time correct (no revision lookahead). Needs FRED_API_KEY.
 - `data/sharadar.py` — **deferred Lane-2 adapter**; same schema, switch on when a key is added.
-- `data/pit.py` — point-in-time access: `fundamentals_asof`, `prices_asof`, `annual_history`, `last_price`.
+- `data/pit.py` — point-in-time access: `fundamentals_asof`, `prices_asof`, `annual_history`,
+  `last_price`, `macro_asof` (latest vintage in force on `as_of`), `macro_series_asof` (full
+  vintage-correct macro time series for regressions).
+- `exposures.py` — macro rate/curve/credit **exposure betas** (univariate OLS of periodic returns
+  on factor changes, PIT) + **recession base rate** by NBER (USREC) regime. Measured sensitivities
+  and base rates, never forecasts; thin/absent samples read "Not estimated".
 - `universe.py` — `backtest_universe` (full, delisted-incl.) vs `screening_universe` (liquid floor);
   market cap = shares × last price (vendor-agnostic).
 - `factors.py` — value/quality/profitability/momentum/low-vol as within-universe percentile ranks.
 - `valuation.py` — reverse-DCF *implied* growth (range over discount rates) + relative multiples vs peers.
 - `flags.py` — Piotroski F, Altman Z, Beneish M (scores + components + missing-list).
 - `report.py` — assembles the full `SecurityReport` from the above.
+- `portfolio.py` — **v2** risk-based weighting (inverse-variance / equal-risk-contribution /
+  HRP, all pure-numpy), position + liquidity caps, and bounded fractional-Kelly (pure math;
+  requires an explicit expected-return vector -- the tool never fabricates `mu`). PIT covariance.
 - `llm.py` — bounded bull/bear narrative (optional; grounded only in computed figures).
-- `cli.py` — `pull` / `pull-sp500` / `universe` / `screen` / `report`.
+- `cli.py` — `pull` / `pull-sp500` / `universe` / `screen` / `report` / `construct` / `pull-macro` /
+  `macro` / `exposures`.
 
 ## Status & data lane
 - **Phase 0 complete; v1 complete.** Data lane = **Lane 1 (free): EDGAR + Yahoo + (FRED planned)**.
@@ -60,11 +77,16 @@ python -m equity_research.cli report AAPL              # full SecurityReport (+ 
 - See `docs/phase0_data_inventory.md` for the data honesty report and decision log.
 
 ## Not built yet (roadmap)
-- **v2 portfolio construction:** risk parity / HRP, fractional-Kelly with a hard cap, position/sector/
-  liquidity limits.
+- **v2 portfolio construction** — inverse-variance / ERC / HRP weighting, position + liquidity caps,
+  and **Kelly now wired to a CLI edge input** (`construct --method kelly --edge TICKER=EXCESS` /
+  `--edge-file`; `--kelly-fraction`, `--max-weight`). Expected returns are user-supplied and echoed as
+  assumptions; the tool never invents them. **Still to do:** sector caps (need stored PIT sector data).
+- **Macro:** FRED/ALFRED adapter (vintage-aware `macro` table + `macro_asof`/`macro_series_asof`) **and
+  the rate/recession exposure analytics are built** (`exposures.py`, `exposures` CLI): per-factor OLS
+  betas to the 10Y / 10Y-2Y / HY spread + an NBER-regime base rate. Live-validated (FRED key set). Note:
+  daily rate series are pulled plain (not revised); only CPI/UNRATE/USREC pull ALFRED vintages.
 - **v3 validated backtesting:** walk-forward, costs netted out, multi-regime stress, multiple-testing
   correction (deflated Sharpe). Requires point-in-time index membership (Sharadar) for survivorship-free runs.
-- FRED/ALFRED macro adapter (rate/recession exposures).
 
 ## Working norms
 - Tests for every new analytical piece; synthetic fixtures with hand-computed expected values.
