@@ -80,6 +80,36 @@ def load_table(
     conn.unregister("_incoming")
 
 
+def table_exists(conn: duckdb.DuckDBPyConnection, table_name: str) -> bool:
+    row = conn.execute(
+        "SELECT 1 FROM information_schema.tables WHERE table_name = ?", [table_name]
+    ).fetchone()
+    return row is not None
+
+
+def upsert_by_ticker(
+    conn: duckdb.DuckDBPyConnection, df: pd.DataFrame, table_name: str
+) -> None:
+    """Replace-by-ticker upsert: keep rows for other tickers, swap in the new ones.
+
+    Lets the universe grow incrementally across pulls (re-pulling AAPL refreshes
+    AAPL without wiping MSFT). Reconciles column drift via pandas concat, so adding
+    new EDGAR concepts later doesn't break the append.
+    """
+    if df.empty:
+        return
+    tickers = df["ticker"].unique().tolist()
+    if table_exists(conn, table_name):
+        placeholders = ",".join("?" * len(tickers))
+        existing = conn.execute(
+            f"SELECT * FROM {table_name} WHERE ticker NOT IN ({placeholders})", tickers
+        ).df()
+        combined = pd.concat([existing, df], ignore_index=True)
+    else:
+        combined = df
+    load_table(conn, combined, table_name)
+
+
 def latest_snapshot_date(conn: duckdb.DuckDBPyConnection, table_name: str) -> dt.date | None:
     row = conn.execute(
         f"SELECT max(snapshot_date) FROM {_SNAPSHOT_REGISTRY} WHERE table_name = ?",

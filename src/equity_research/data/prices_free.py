@@ -98,7 +98,7 @@ def ingest(
             conn, prices, "prices", source="Yahoo Finance chart",
             vendor="yahoo", snapshot_date=snapshot_date, cfg=cfg,
         )
-        storage.load_table(conn, prices, "prices")
+        storage.upsert_by_ticker(conn, prices, "prices")
     finally:
         conn.close()
     summary["rows"] = len(prices)

@@ -49,25 +49,53 @@ Only: (a) translate computed metrics into plain-language theses / bull–bear ca
 and missing data. It never produces a numeric estimate of its own and never overrides a computed value.
 
 ## Current status
-**Phase 0 complete — Lane 1 (free) chosen to start; Sharadar is the planned upgrade.**
-Python 3.12 + `.venv` installed. EDGAR + Yahoo adapters **built and live-validated** against
-AAPL/MSFT; **8/8 tests pass** (point-in-time, survivorship-free universe, and the EDGAR
-flow-duration logic). Stack: Python + DuckDB/Parquet.
+**Phase 0 complete — Lane 1 (free) chosen; Sharadar is the planned upgrade. v1 working:
+factor screen + valuation + accounting-quality flags + full SecurityReport (with optional
+LLM bull/bear) + persistent universe.** Python 3.12 + `.venv` installed. EDGAR + Yahoo adapters
+built and live-validated; **31/31 tests pass** (point-in-time, survivorship-free universe, EDGAR
+flow-duration logic, factor math, flags, valuation, upsert persistence, report assembly, LLM parsing).
+Stack: Python + DuckDB/Parquet.
 
 **Data sources (free, no subscription):**
 - **Fundamentals:** SEC EDGAR `companyfacts` — as-reported, keyed on filing date → point-in-time.
-  Curated us-gaap/dei concepts; quarterly vs annual durations disambiguated. (`data/edgar.py`)
+  Curated us-gaap/dei concepts; quarterly vs annual durations disambiguated; tag migrations
+  handled (e.g. NVDA revenue). (`data/edgar.py`)
 - **Prices:** Yahoo Finance chart API for current names. (`data/prices_free.py`)
   *Survivorship-biased — backtests stay "indicative only" until a delisted-price source
   (EODHD ~$20/mo or Sharadar) is added.*
 - **Macro:** FRED/ALFRED (vintage / as-released) — adapter not built yet.
 
 Lane 2 (Sharadar) ingestion lives in `data/sharadar.py`, ready to switch on once a key is added —
-the storage / point-in-time / universe layers don't change.
+the storage / point-in-time / universe / factor layers don't change.
 
 ### Quickstart
 ```
-.venv\Scripts\python -m pytest -q                              # 8/8
-set EQR_DATA_DIR=%CD%\data
-.venv\Scripts\python scripts\validate_lane1.py                 # live EDGAR + Yahoo pull
+.venv\Scripts\python -m pytest -q                                     # 31/31
+.venv\Scripts\python -m equity_research.cli pull-sp500 --limit 50     # seed the universe (accumulates)
+.venv\Scripts\python -m equity_research.cli universe                  # what's loaded
+.venv\Scripts\python -m equity_research.cli screen                    # factor ranks, whole universe
+.venv\Scripts\python -m equity_research.cli report AAPL               # full SecurityReport
 ```
+(Run from the repo root so data lands in `.\data`, which is git-ignored. `pull TICKERS...` and
+`pull-sp500` both ACCUMULATE — re-pulling refreshes a name, others stay.)
+
+### What works today (v1)
+- **Persistent universe:** `pull` / `pull-sp500` upsert by ticker (build up the S&P 500 without
+  re-pulling); `universe` shows what's loaded.
+- **Multi-factor screen:** value / quality / profitability / momentum / low-vol as **percentile
+  ranks within the loaded universe** (0-100, higher = more attractive), plus a composite. PIT correct.
+- **Valuation (ranges, never a point estimate):** reverse-DCF *implied* FCF growth across discount
+  rates, and P/E / P/B / P/S vs the universe median + IQR.
+- **Accounting-quality flags:** Piotroski F (0-9), Altman Z (distress zones), Beneish M (manipulation
+  screen) — with thresholds shown; flags, not predictions.
+- **`report TICKER`** renders the full honest `SecurityReport` (data completeness, confidence tier,
+  valuation read, factor profile, quality flags, machine-quantified risks, what-would-change) plus an
+  **optional bounded LLM bull/bear narrative** (`pip install -e .[llm]` + `ANTHROPIC_API_KEY`; defaults
+  to `claude-opus-4-8`, override `EQR_LLM_MODEL`). The LLM only narrates the computed figures — it
+  never invents a number; without a key the narrative reads "Not estimated."
+- Throughout: missing inputs read **"Not estimated"** with the reason, never a fabricated number
+  (e.g. a bank's Altman Z and reverse-DCF correctly refuse rather than mislead).
+
+### Not built yet
+- FRED/ALFRED macro adapter; v2 portfolio construction (risk parity / fractional-Kelly with caps);
+  v3 validated backtesting; point-in-time index membership (needs Sharadar) for survivorship-free backtests.

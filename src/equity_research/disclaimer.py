@@ -62,7 +62,7 @@ class SecurityReport:
 
     def render(self) -> str:
         rows = [
-            ("Ticker / Company", f"{self.ticker} — {self.company}"),
+            ("Ticker / Company", f"{self.ticker} - {self.company}"),
             ("Data completeness", self.data_completeness),
             ("Confidence tier", self.confidence_tier),
             ("Valuation read", self.valuation_read),

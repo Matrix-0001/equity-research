@@ -38,6 +38,7 @@ CONCEPTS: dict[str, tuple[str, list[tuple[str, str]]]] = {
     # Income statement
     "revenue": ("USD", [
         ("us-gaap", "RevenueFromContractWithCustomerExcludingAssessedTax"),
+        ("us-gaap", "RevenueFromContractWithCustomerIncludingAssessedTax"),
         ("us-gaap", "Revenues"),
         ("us-gaap", "SalesRevenueNet"),
     ]),
@@ -72,6 +73,22 @@ CONCEPTS: dict[str, tuple[str, list[tuple[str, str]]]] = {
         ("us-gaap", "NetCashProvidedByUsedInOperatingActivitiesContinuingOperations"),
     ]),
     "capex": ("USD", [("us-gaap", "PaymentsToAcquirePropertyPlantAndEquipment")]),
+    # Extra fields for accounting-quality flags (Altman Z, Beneish M)
+    "retained_earnings": ("USD", [("us-gaap", "RetainedEarningsAccumulatedDeficit")]),
+    "receivables": ("USD", [
+        ("us-gaap", "AccountsReceivableNetCurrent"),
+        ("us-gaap", "ReceivablesNetCurrent"),
+    ]),
+    "ppe_net": ("USD", [("us-gaap", "PropertyPlantAndEquipmentNet")]),
+    "depreciation": ("USD", [
+        ("us-gaap", "DepreciationDepletionAndAmortization"),
+        ("us-gaap", "DepreciationAmortizationAndAccretionNet"),
+        ("us-gaap", "Depreciation"),
+    ]),
+    "sga": ("USD", [
+        ("us-gaap", "SellingGeneralAndAdministrativeExpense"),
+        ("us-gaap", "GeneralAndAdministrativeExpense"),
+    ]),
     # Shares (cover-page count; dei first, then us-gaap fallbacks)
     "shares_outstanding": ("shares", [
         ("dei", "EntityCommonStockSharesOutstanding"),
@@ -103,31 +120,35 @@ def fetch_company_facts(cik: int, cfg: Config = config) -> dict:
 
 
 def _pick_value(
-    entries: list[tuple[str | None, str, float | None]],
+    entries: list[tuple[int, str | None, str, float | None]],
     period_end: str,
     target_days: int,
 ) -> float | None:
-    """Choose the right fact among (start, end, val) tuples for one concept.
+    """Choose the right fact among (priority, start, end, val) tuples for one concept.
 
     Prefers facts ending on `period_end`; for flow items (which carry a `start`),
-    picks the one whose duration is closest to `target_days` (quarter vs year), so
-    a 10-Q's 6-month YTD figure isn't mistaken for the quarterly number.
+    picks the one whose duration is closest to `target_days` (quarter vs year), so a
+    10-Q's 6-month YTD figure isn't mistaken for the quarterly number. Ties break to
+    the higher-priority candidate tag (lower index), which matters when a filer uses
+    several revenue tags or switches tags between eras.
     """
-    pool = [t for t in entries if t[1] == period_end]
+    pool = [t for t in entries if t[2] == period_end]
     if not pool:
-        usable = [t for t in entries if t[1] <= period_end]
+        usable = [t for t in entries if t[2] <= period_end]
         if not usable:
             return None
-        latest = max(t[1] for t in usable)
-        pool = [t for t in usable if t[1] == latest]
-    flows = [t for t in pool if t[0]]
+        latest = max(t[2] for t in usable)
+        pool = [t for t in usable if t[2] == latest]
+    nonnull = [t for t in pool if t[3] is not None]
+    if not nonnull:
+        return None
+    flows = [t for t in nonnull if t[1]]
     if flows:
-        def _dur_err(t: tuple[str | None, str, float | None]) -> int:
-            return abs(
-                (dt.date.fromisoformat(t[1]) - dt.date.fromisoformat(t[0])).days - target_days
-            )
-        return min(flows, key=_dur_err)[2]
-    return pool[0][2]
+        def _key(t: tuple[int, str | None, str, float | None]) -> tuple[int, int]:
+            dur = (dt.date.fromisoformat(t[2]) - dt.date.fromisoformat(t[1])).days
+            return (abs(dur - target_days), t[0])
+        return min(flows, key=_key)[3]
+    return min(nonnull, key=lambda t: t[0])[3]  # instant: highest-priority tag
 
 
 def extract_fundamentals(ticker: str, facts_json: dict) -> pd.DataFrame:
@@ -137,7 +158,10 @@ def extract_fundamentals(ticker: str, facts_json: dict) -> pd.DataFrame:
     # accn -> {filed, form, concepts: {logical: [(end, val), ...]}}
     by_accn: dict[str, dict] = {}
     for logical, (unit, candidates) in CONCEPTS.items():
-        for taxonomy, tag in candidates:
+        # Collect entries from ALL candidate tags (a filer can switch tags over time,
+        # e.g. NVDA moved revenue from RevenueFromContract... to Revenues). Each entry
+        # keeps its candidate priority so the preferred tag wins per period.
+        for prio, (taxonomy, tag) in enumerate(candidates):
             node = facts_root.get(taxonomy, {}).get(tag)
             if not node:
                 continue
@@ -152,9 +176,8 @@ def extract_fundamentals(ticker: str, facts_json: dict) -> pd.DataFrame:
                     accn, {"filed": filed, "form": e.get("form"), "concepts": {}}
                 )
                 rec["concepts"].setdefault(logical, []).append(
-                    (e.get("start"), end, e.get("val"))
+                    (prio, e.get("start"), end, e.get("val"))
                 )
-            break  # first matching tag wins for this concept
 
     rows: list[dict] = []
     for rec in by_accn.values():
@@ -165,7 +188,7 @@ def extract_fundamentals(ticker: str, facts_json: dict) -> pd.DataFrame:
         # cover-page share count, whose "as of" date can sit after period end).
         fin_ends = [
             end for name, lst in concepts.items() if name != "shares_outstanding"
-            for _s, end, _v in lst
+            for _p, _s, end, _v in lst
         ]
         if not fin_ends:
             continue
@@ -183,7 +206,8 @@ def extract_fundamentals(ticker: str, facts_json: dict) -> pd.DataFrame:
         }
         for name, lst in concepts.items():
             if name == "shares_outstanding":
-                row[name] = max(lst, key=lambda x: x[1])[2]  # instant, closest to filing
+                nn = [t for t in lst if t[3] is not None]
+                row[name] = max(nn, key=lambda x: x[2])[3] if nn else None  # latest end
             else:
                 row[name] = _pick_value(lst, period_end, target_days)
         rows.append(row)
@@ -243,7 +267,7 @@ def ingest(
             conn, allf, "fundamentals", source="SEC EDGAR companyfacts",
             vendor="edgar", snapshot_date=snapshot_date, cfg=cfg,
         )
-        storage.load_table(conn, allf, "fundamentals")
+        storage.upsert_by_ticker(conn, allf, "fundamentals")
     finally:
         conn.close()
     summary["rows"] = len(allf)
