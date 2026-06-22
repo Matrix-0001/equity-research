@@ -88,11 +88,37 @@ authorize Sharadar and flip the lane for Phase B. Ask Darrell to confirm the spe
 
 ## 7. Decision required from Darrell (Phase-0-style gate)
 
-- [ ] **Lane for v3:** build Phase A free/indicative-only first? (recommended) Then —
+- [x] **Lane for v3:** build **Phase A on free Lane-1 data first (indicative-only)** to prove the
+      engine. *(Decided 2026-06-22 — see decision log below.)*
 - [ ] **Authorize Sharadar spend** for valid (survivorship-free) backtests, and confirm price +
-      non-professional license at signup (Phase 0 §7.1)?
+      non-professional license at signup (Phase 0 §7.1)? **Deferred** — no spend authorized yet;
+      Phase B stays unwritten until this box is ticked.
 
 Until the lane is chosen, Phase B is not written. That gate is working as intended.
+
+### Decision log
+
+**2026-06-22 - Phase A on Lane 1 (free), indicative-only.** Build the walk-forward engine, the
+cost model, and the net-of-cost statistics on free EDGAR + Yahoo data first, to prove the machinery
+honestly. **Every run is stamped "indicative only - survivorship/lookahead risk present"**: free
+Yahoo prices drop delisted names (survivorship bias) and EDGAR has no point-in-time index
+membership, so a backtest over-counts winners and the universe is not survivorship-free. This is
+acceptable for *validating the machinery*, never for a defensible track record.
+
+*Limits accepted (carried from Phase 0, restated for v3):*
+1. **Survivorship-biased universe** -> the validity stamp is INDICATIVE-ONLY on every Phase A run.
+2. **Costs are modelled, not observed** -> spread/commission/impact/tax are explicit, auditable
+   assumptions in `BacktestConfig` (not vendor fills); delisting *outcomes* (acquired vs bankrupt)
+   are not modelled on free data, so a delisted name is liquidated at its last observed price
+   (best case) - another reason the run is indicative-only.
+3. **Out-of-sample discipline is partial in Phase A** -> the engine is point-in-time and
+   walk-forward by construction (each rebalance sees only `date <= as_of`), but the *locked test
+   set*, *multiple-testing correction (Deflated Sharpe)*, and *multi-regime stress table* are
+   Phase C. A single realized path is reported with a Sharpe +/- 1 standard-error range, never as
+   a lone hero number.
+
+**Sharadar spend (Phase B) deferred.** No authorization to spend today. When v3 has proven useful,
+revisit Phase 0 §7.1 (confirm SF1/SEP price + non-professional license at signup) and flip the lane.
 
 ---
 

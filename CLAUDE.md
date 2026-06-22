@@ -20,7 +20,7 @@ surface caveats. It never produces a number of its own and never overrides a com
 ## Stack & environment
 - Python 3.12 at `%LOCALAPPDATA%\Programs\Python\Python312`; project venv at `.venv`.
 - DuckDB + Parquet for local storage (`./data`, git-ignored). pandas/pyarrow.
-- Run tests: `.venv\Scripts\python -m pytest -q`  (currently **87/87 green**).
+- Run tests: `.venv\Scripts\python -m pytest -q`  (currently **124/124 green**).
 - Optional LLM: `pip install -e .[llm]` + `ANTHROPIC_API_KEY` (default model `claude-opus-4-8`,
   override `EQR_LLM_MODEL`). Without it, narratives read "Not estimated".
 
@@ -37,17 +37,22 @@ python -m equity_research.cli construct --method kelly --edge AAPL=0.06 --edge M
 python -m equity_research.cli pull-macro               # FRED/ALFRED macro, vintage-aware (needs FRED_API_KEY)
 python -m equity_research.cli macro                    # macro values known as-of a date (no lookahead)
 python -m equity_research.cli exposures AAPL           # rate/curve/credit betas + recession base rate
+python -m equity_research.cli backtest --strategy hrp --start 2024-07-01 --rebalance monthly  # v3 walk-forward, net of costs (free lane = INDICATIVE ONLY)
 ```
 
 ## Architecture (src/equity_research/)
 - `config.py` — all tunable assumptions in one auditable place (universe floors, SEC UA, FRED key,
-  LLM model, `PortfolioConfig`: covariance/caps/Kelly, `ExposureConfig`: regression freq/lookback/factors).
-- `disclaimer.py` — persistent disclaimer + `SecurityReport` dataclass (fields default to "Not estimated").
+  LLM model, `PortfolioConfig`: covariance/caps/Kelly, `ExposureConfig`: regression freq/lookback/factors,
+  `BacktestConfig`: cost bps/impact/tax/cadence/initial capital/locked-test boundary).
+- `disclaimer.py` — persistent disclaimer + `SecurityReport` dataclass (fields default to "Not
+  estimated") + `BacktestResult` (net-of-cost stats, gross alongside, lane + validity stamp).
 - `data/storage.py` — DuckDB + versioned raw parquet snapshots; `upsert_by_ticker` (persistent universe).
 - `data/http.py` — GET with retry/backoff (env network is intermittently flaky).
 - `data/edgar.py` — SEC EDGAR `companyfacts` → `fundamentals` table, as-reported, filing-date keyed.
   Handles flow-duration (10-Q quarterly vs YTD) and tag migration (multi-candidate, priority-ranked).
 - `data/prices_free.py` — Yahoo chart API → `prices` table (survivorship-biased; documented).
+  Fetches full **daily** history via explicit `period1/period2` epoch window (the `range=max`
+  keyword silently downsamples to quarterly — never used), so backtests span real regimes.
 - `data/reference.py` — current S&P 500 constituents (seed only; not point-in-time membership).
 - `data/fred.py` — FRED/ALFRED macro adapter (Lane 1). Pulls **vintages** (value as known at each
   date) into the `macro` table, so macro is point-in-time correct (no revision lookahead). Needs FRED_API_KEY.
@@ -69,9 +74,23 @@ python -m equity_research.cli exposures AAPL           # rate/curve/credit betas
 - `portfolio.py` — **v2** risk-based weighting (inverse-variance / equal-risk-contribution /
   HRP, all pure-numpy), position + liquidity caps, and bounded fractional-Kelly (pure math;
   requires an explicit expected-return vector -- the tool never fabricates `mu`). PIT covariance.
+- `costs.py` — **v3** pure transaction-cost model: half-spread + commission + sqrt-law market
+  impact in ADV participation; unknown/thin ADV charged at the participation cap (conservative,
+  never skipped). Hand-testable.
+- `metrics.py` — **v3** pure performance metrics over a NET return series: CAGR, ann vol, Sharpe
+  (+ analytic SE so it's reported as a RANGE), Sortino, max drawdown, hit rate. (Deflated Sharpe
+  = Phase C.)
+- `backtest.py` — **v3 Phase A** walk-forward engine. Reuses pit/universe/portfolio/factors so
+  every rebalance is point-in-time; holds positions as units of `closeadj` (returns compound
+  automatically) **plus an explicit cash line** (undeployed capital from tight caps / a thin
+  universe is HELD, never evaporates -- a leak here once faked a -72% drawdown); charges costs +
+  tax each rebalance; tracks net-of-cost NAV, per-period returns, turnover. Delisting-aware (stale
+  holdings liquidated at last price, never silently survived). Reports the strategy against an
+  **equal-weight 1/N benchmark** (same universe/costs) with excess CAGR. Strategies: hrp /
+  risk_parity / inverse_variance / composite / equal_weight. Free lane => every run "indicative only".
 - `llm.py` — bounded bull/bear narrative (optional; grounded only in computed figures).
 - `cli.py` — `pull` / `pull-sp500` / `universe` / `screen` / `report` / `construct` / `pull-macro` /
-  `macro` / `exposures` / `pull-sectors`.
+  `macro` / `exposures` / `pull-sectors` / `backtest`.
 
 ## Status & data lane
 - **Phase 0 complete; v1 complete.** Data lane = **Lane 1 (free): EDGAR + Yahoo + (FRED planned)**.
@@ -88,9 +107,13 @@ python -m equity_research.cli exposures AAPL           # rate/curve/credit betas
   the rate/recession exposure analytics are built** (`exposures.py`, `exposures` CLI): per-factor OLS
   betas to the 10Y / 10Y-2Y / HY spread + an NBER-regime base rate. Live-validated (FRED key set). Note:
   daily rate series are pulled plain (not revised); only CPI/UNRATE/USREC pull ALFRED vintages.
-- **v3 validated backtesting:** walk-forward, costs netted out, multi-regime stress, multiple-testing
-  correction (deflated Sharpe). Requires point-in-time index membership (Sharadar) for survivorship-free
-  runs. **Build spec: `docs/v3_backtesting.md`** (data-lane gate + phased plan).
+- **v3 validated backtesting — Phase A COMPLETE (free lane, indicative-only).** Walk-forward engine
+  (`backtest.py`) + cost model (`costs.py`) + net-of-cost metrics (`metrics.py`) + `backtest` CLI.
+  Point-in-time and survivorship-free *at the engine level*; every run stamped "indicative only"
+  because free Yahoo prices are survivorship-biased and EDGAR has no PIT index membership. Sharpe
+  reported as a +/- 1 SE range. **Phase B (Sharadar, survivorship-free) and Phase C (locked test
+  set + Deflated Sharpe + multi-regime stress) are NOT built** — see `docs/v3_backtesting.md` §5/§7.
+  Phase B is gated on authorizing Sharadar spend (Darrell, not yet given).
 
 ## Working norms
 - Tests for every new analytical piece; synthetic fixtures with hand-computed expected values.

@@ -21,7 +21,7 @@ from dataclasses import replace
 
 import pandas as pd
 
-from equity_research import exposures, factors, portfolio, report, universe
+from equity_research import backtest, exposures, factors, portfolio, report, universe
 from equity_research.config import config
 from equity_research.data import edgar, fred, pit, prices_free, reference, sectors, storage
 from equity_research.disclaimer import PERSISTENT_DISCLAIMER
@@ -267,6 +267,25 @@ def _construct(tickers: list[str], asof: dt.date, method: str, top: int, value: 
     print(res.render())
 
 
+def _backtest(strategy: str, start: dt.date, end: dt.date, rebalance: str, lane: str,
+              value: float | None, tax: float | None) -> None:
+    over: dict = {}
+    if rebalance:
+        over["rebalance"] = rebalance
+    if value is not None:
+        over["initial_capital_usd"] = value
+    if tax is not None:
+        over["tax_rate"] = tax
+    btcfg = replace(config.backtest, **over) if over else config.backtest
+    conn = storage.connect()
+    try:
+        res = backtest.run_backtest(conn, start, end, strategy=strategy, cfg=config,
+                                    bt=btcfg, lane=lane)
+    finally:
+        conn.close()
+    print(res.render())
+
+
 def main(argv: list[str] | None = None) -> None:
     ap = argparse.ArgumentParser(prog="equity_research.cli")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -344,6 +363,25 @@ def main(argv: list[str] | None = None) -> None:
     exp.add_argument("--asof", default=dt.date.today().isoformat(),
                      help="point-in-time date (YYYY-MM-DD); default today")
 
+    bt = sub.add_parser(
+        "backtest",
+        help="Walk-forward, net-of-cost backtest (Phase A: free lane, INDICATIVE-ONLY)",
+    )
+    bt.add_argument("--strategy", default="hrp", choices=list(backtest.STRATEGIES),
+                    help="fixed strategy to rebalance into at each date")
+    bt.add_argument("--start", required=True, help="backtest start date (YYYY-MM-DD)")
+    bt.add_argument("--end", default=dt.date.today().isoformat(),
+                    help="backtest end date (YYYY-MM-DD); default today")
+    bt.add_argument("--rebalance", default=config.backtest.rebalance,
+                    choices=["monthly", "quarterly"], help="rebalance cadence")
+    bt.add_argument("--lane", default="free", choices=["free", "sharadar"],
+                    help="data lane; only 'free' is built (Phase A). 'sharadar' is Phase B.")
+    bt.add_argument("--value", type=float, default=None,
+                    help=f"initial capital (default {config.backtest.initial_capital_usd:,.0f})")
+    bt.add_argument("--tax", type=float, default=None,
+                    help=f"tax rate on realized gains per rebalance "
+                         f"(default {config.backtest.tax_rate}; 0 = tax-deferred)")
+
     args = ap.parse_args(argv)
     if args.cmd == "pull":
         _pull(args.tickers, dt.date.fromisoformat(args.asof))
@@ -368,6 +406,10 @@ def main(argv: list[str] | None = None) -> None:
         _macro(dt.date.fromisoformat(args.asof))
     elif args.cmd == "exposures":
         _exposures(args.ticker, dt.date.fromisoformat(args.asof))
+    elif args.cmd == "backtest":
+        _backtest(args.strategy, dt.date.fromisoformat(args.start),
+                  dt.date.fromisoformat(args.end), args.rebalance, args.lane,
+                  args.value, args.tax)
 
 
 if __name__ == "__main__":

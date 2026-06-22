@@ -7,6 +7,7 @@ assumption that affects an output from this one file.
 
 from __future__ import annotations
 
+import datetime as dt
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -79,6 +80,39 @@ class ExposureConfig:
 
 
 @dataclass(frozen=True)
+class BacktestConfig:
+    """v3 backtesting assumptions -- costs (ALWAYS applied) + rebalance cadence + OOS discipline.
+
+    Costs honor non-negotiable #2 ("costs always included; a pre-cost number is never shown
+    alone"). Every trade pays, in basis points of its traded notional, a half-spread + a
+    commission + a square-root market-impact term in the trade's participation in average daily
+    dollar volume (the model lives in `costs.py`). A configurable tax drag is charged on realized
+    gains at each rebalance: `tax_rate = 0.0` models a tax-deferred account (IRA/401k), a positive
+    rate a taxable one. These are explicit, auditable ASSUMPTIONS -- not observed vendor fills.
+    """
+
+    # Transaction costs (basis points of traded notional, charged on every trade).
+    spread_bps: float = 5.0            # half-spread crossed from mid to the touch, per trade
+    commission_bps: float = 1.0        # broker/exchange commission, per trade
+    impact_coef: float = 10.0          # market impact (bps) at 100% ADV participation (sqrt law)
+    impact_participation_cap: float = 1.0   # cap on participation; thin/unknown ADV charged here
+    # Tax.
+    tax_rate: float = 0.0              # drag on realized gains per rebalance (0 = tax-deferred)
+    # Walk-forward cadence + capital.
+    rebalance: str = "monthly"         # "monthly" | "quarterly"
+    initial_capital_usd: float = 1_000_000.0
+    # A held name with no price within this many calendar days of a rebalance is treated as
+    # delisted/untradeable (realized at its last observed price, then dropped -- survivorship-free).
+    staleness_days: int = 10
+    # Risk-free rate per period for the Sharpe/Sortino numerator (Phase A keeps it explicit and
+    # simple; 0.0 reports an excess-over-cash Sharpe of 0 cash, documented in the output).
+    risk_free_annual: float = 0.0
+    # Out-of-sample discipline: Phase C enforces the lock + Deflated Sharpe; recorded here now so
+    # a run's provenance always carries the intended hold-out boundary.
+    locked_test_start: dt.date | None = None
+
+
+@dataclass(frozen=True)
 class Config:
     # --- Data location -----------------------------------------------------
     data_dir: Path = field(
@@ -112,6 +146,9 @@ class Config:
 
     # --- Macro exposure analytics ------------------------------------------
     exposures: ExposureConfig = field(default_factory=ExposureConfig)
+
+    # --- Validated backtesting (v3) ----------------------------------------
+    backtest: BacktestConfig = field(default_factory=BacktestConfig)
 
     # --- Point-in-time fundamentals ----------------------------------------
     # Sharadar SF1 'dimension'. AR* = As-Reported (original filing), which is

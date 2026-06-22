@@ -35,7 +35,9 @@ Markets are assumed mostly efficient; durable edges are rare, narrow, and decay 
 - **v2** — Portfolio construction (diversification, risk parity / HRP, fractional Kelly with a hard
   cap; position/sector/liquidity limits).
 - **v3** — Validated backtesting + multi-regime stress tests (dot-com, GFC, COVID, 2022), reported
-  net of costs and with multiple-testing correction.
+  net of costs and with multiple-testing correction. **Phase A (engine + cost model on free data,
+  indicative-only) is complete;** Phase B (survivorship-free via Sharadar) and Phase C (locked test
+  set, Deflated Sharpe, regime stress) are pending. See [v3 build spec](docs/v3_backtesting.md).
 - **v4 (gated)** — sentiment/NLP & alt-data, only if proven licensable *and* additive out-of-sample.
 
 ## What this system will NOT claim to do
@@ -52,19 +54,22 @@ and missing data. It never produces a numeric estimate of its own and never over
 **Phase 0 complete — Lane 1 (free) chosen; Sharadar is the planned upgrade. v1 + v2 complete:
 factor screen + valuation + accounting-quality flags + full SecurityReport (optional LLM bull/bear)
 + persistent universe; v2 portfolio construction (risk parity / HRP, fractional Kelly, position +
-sector + liquidity caps); FRED/ALFRED macro + rate/recession exposures.** Python 3.12 + `.venv`
+sector + liquidity caps); FRED/ALFRED macro + rate/recession exposures. v3 Phase A complete:
+walk-forward backtest engine + transaction-cost model + net-of-cost metrics + equal-weight
+benchmark (free lane, every run stamped "indicative only").** Python 3.12 + `.venv`
 installed. EDGAR + Yahoo adapters
-built and live-validated; **87/87 tests pass** (point-in-time, survivorship-free universe, EDGAR
+built and live-validated; **124/124 tests pass** (point-in-time, survivorship-free universe, EDGAR
 flow-duration logic, factor math, flags, valuation, upsert persistence, report assembly, LLM parsing,
 v2 portfolio weighting / position+sector+liquidity caps / Kelly, vintage-aware FRED/ALFRED macro,
-macro exposure regressions, and SIC->sector mapping).
+macro exposure regressions, SIC->sector mapping, and v3 cost model / metrics / walk-forward engine
+incl. no-lookahead, cost accounting, NAV compounding, delisting, cash conservation, and benchmark).
 Stack: Python + DuckDB/Parquet.
 
 **Data sources (free, no subscription):**
 - **Fundamentals:** SEC EDGAR `companyfacts` — as-reported, keyed on filing date → point-in-time.
   Curated us-gaap/dei concepts; quarterly vs annual durations disambiguated; tag migrations
   handled (e.g. NVDA revenue). (`data/edgar.py`)
-- **Prices:** Yahoo Finance chart API for current names. (`data/prices_free.py`)
+- **Prices:** Yahoo Finance chart API for current names, full **daily** history (`data/prices_free.py`).
   *Survivorship-biased — backtests stay "indicative only" until a delisted-price source
   (EODHD ~$20/mo or Sharadar) is added.*
 - **Macro:** FRED/ALFRED (vintage / as-released) — adapter not built yet.
@@ -80,6 +85,7 @@ the storage / point-in-time / universe / factor layers don't change.
 .venv\Scripts\python -m equity_research.cli screen                    # factor ranks, whole universe
 .venv\Scripts\python -m equity_research.cli report AAPL               # full SecurityReport
 .venv\Scripts\python -m equity_research.cli construct --method hrp    # risk-based weights + caps (v2)
+.venv\Scripts\python -m equity_research.cli backtest --strategy hrp --start 2024-07-01  # walk-forward, net of costs (v3 Phase A; INDICATIVE ONLY)
 ```
 (Run from the repo root so data lands in `.\data`, which is git-ignored. `pull TICKERS...` and
 `pull-sp500` both ACCUMULATE — re-pulling refreshes a name, others stay.)
@@ -124,7 +130,26 @@ the storage / point-in-time / universe / factor layers don't change.
   with standard errors / t / R^2 / n -- plus a **recession base rate** by NBER (USREC) regime. Measured
   historical sensitivities and base rates, **never forecasts**; thin/absent samples read "Not estimated".
 
+### What works today (v3 Phase A, complete -- INDICATIVE ONLY)
+- **`backtest --strategy {hrp,risk_parity,inverse_variance,composite,equal_weight} --start
+  YYYY-MM-DD [--end --rebalance monthly|quarterly --value --tax]`** runs a walk-forward backtest
+  that reuses the v1 screen + v2 construction. Each rebalance sees only `date <= as_of`
+  (point-in-time); positions are held as units of the split/dividend-adjusted price so returns
+  compound automatically (with an explicit cash line, so capital the caps can't deploy is held, not
+  lost); **every trade is charged** (half-spread + commission + sqrt-law market impact in ADV) plus
+  a configurable tax drag; the result reports a NET-of-cost NAV with the GROSS path alongside, a
+  Sharpe **range** (+/- 1 SE), Sortino, max drawdown, hit rate, turnover, the annualized cost drag,
+  and the **excess CAGR vs an equal-weight 1/N benchmark** on the same universe (an absolute return
+  is meaningless without one).
+- Delisting-aware at the engine level: a held name that stops trading is marked at its last price
+  then liquidated, never silently survived. Free prices are now fetched as deep **daily** history
+  (so a run can span GFC/COVID/2022). **But on the free lane every run is stamped "indicative
+  only"** -- Yahoo prices are survivorship-biased and EDGAR has no point-in-time index membership.
+
 ### Not built yet
-- **v2 is complete.** Next: v3 validated backtesting (walk-forward, costs netted, multi-regime stress,
-  deflated Sharpe) -- needs point-in-time index membership (Sharadar) for survivorship-free runs.
-  Smaller polish: portfolio-level macro exposures, multi-factor joint regression, true PIT GICS sectors.
+- **v3 Phase B (survivorship-free):** wire `data/sharadar.py` so backtest_universe is
+  delisted-inclusive with PIT index membership and the indicative stamp can drop -- **gated on
+  authorizing Sharadar spend** (Phase 0 / v3 spec §7; not yet given).
+- **v3 Phase C (out-of-sample discipline + stress):** locked test set + walk-forward enforcement,
+  Deflated Sharpe (multiple-testing correction), and the multi-regime stress table.
+- Smaller polish: portfolio-level macro exposures, multi-factor joint regression, true PIT GICS sectors.
