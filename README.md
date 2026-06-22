@@ -54,7 +54,7 @@ factor screen + valuation + accounting-quality flags + full SecurityReport (opti
 + persistent universe; v2 portfolio construction (risk parity / HRP, fractional Kelly, position +
 sector + liquidity caps); FRED/ALFRED macro + rate/recession exposures.** Python 3.12 + `.venv`
 installed. EDGAR + Yahoo adapters
-built and live-validated; **86/86 tests pass** (point-in-time, survivorship-free universe, EDGAR
+built and live-validated; **87/87 tests pass** (point-in-time, survivorship-free universe, EDGAR
 flow-duration logic, factor math, flags, valuation, upsert persistence, report assembly, LLM parsing,
 v2 portfolio weighting / position+sector+liquidity caps / Kelly, vintage-aware FRED/ALFRED macro,
 macro exposure regressions, and SIC->sector mapping).
@@ -74,7 +74,7 @@ the storage / point-in-time / universe / factor layers don't change.
 
 ### Quickstart
 ```
-.venv\Scripts\python -m pytest -q                                     # 86/86
+.venv\Scripts\python -m pytest -q                                     # 87/87
 .venv\Scripts\python -m equity_research.cli pull-sp500 --limit 50     # seed the universe (accumulates)
 .venv\Scripts\python -m equity_research.cli universe                  # what's loaded
 .venv\Scripts\python -m equity_research.cli screen                    # factor ranks, whole universe

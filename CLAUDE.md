@@ -20,7 +20,7 @@ surface caveats. It never produces a number of its own and never overrides a com
 ## Stack & environment
 - Python 3.12 at `%LOCALAPPDATA%\Programs\Python\Python312`; project venv at `.venv`.
 - DuckDB + Parquet for local storage (`./data`, git-ignored). pandas/pyarrow.
-- Run tests: `.venv\Scripts\python -m pytest -q`  (currently **86/86 green**).
+- Run tests: `.venv\Scripts\python -m pytest -q`  (currently **87/87 green**).
 - Optional LLM: `pip install -e .[llm]` + `ANTHROPIC_API_KEY` (default model `claude-opus-4-8`,
   override `EQR_LLM_MODEL`). Without it, narratives read "Not estimated".
 
@@ -89,7 +89,8 @@ python -m equity_research.cli exposures AAPL           # rate/curve/credit betas
   betas to the 10Y / 10Y-2Y / HY spread + an NBER-regime base rate. Live-validated (FRED key set). Note:
   daily rate series are pulled plain (not revised); only CPI/UNRATE/USREC pull ALFRED vintages.
 - **v3 validated backtesting:** walk-forward, costs netted out, multi-regime stress, multiple-testing
-  correction (deflated Sharpe). Requires point-in-time index membership (Sharadar) for survivorship-free runs.
+  correction (deflated Sharpe). Requires point-in-time index membership (Sharadar) for survivorship-free
+  runs. **Build spec: `docs/v3_backtesting.md`** (data-lane gate + phased plan).
 
 ## Working norms
 - Tests for every new analytical piece; synthetic fixtures with hand-computed expected values.

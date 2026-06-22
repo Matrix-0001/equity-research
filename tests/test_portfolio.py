@@ -178,6 +178,14 @@ def test_fractional_kelly_hand_computed():
     assert res.long_only_weights == pytest.approx([0.285714, 0.714286], abs=1e-5)
 
 
+def test_fractional_kelly_singular_cov_does_not_crash():
+    # Two perfectly collinear names (e.g. dual-class shares) -> singular covariance. Kelly must
+    # fall back to the pseudo-inverse and return finite leverage rather than raising LinAlgError.
+    cov = np.array([[0.04, 0.04], [0.04, 0.04]])
+    res = pf.fractional_kelly(np.array([0.06, 0.06]), cov, fraction=0.25, cap=0.5)
+    assert np.all(np.isfinite(res.f_full))
+
+
 # --------------------------------------------------------------------------- #
 # Covariance estimation + orchestrator (synthetic DuckDB)
 # --------------------------------------------------------------------------- #

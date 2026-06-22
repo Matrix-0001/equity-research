@@ -404,7 +404,10 @@ def fractional_kelly(
     """
     mu = np.asarray(mu, dtype=float)
     cov = np.asarray(cov, dtype=float)
-    f_full = np.linalg.solve(cov, mu)
+    try:
+        f_full = np.linalg.solve(cov, mu)
+    except np.linalg.LinAlgError:
+        f_full = np.linalg.pinv(cov) @ mu  # singular covariance -> min-norm Kelly solution
     f_frac = fraction * f_full
     f_capped = np.clip(f_frac, -cap, cap)
 
@@ -616,6 +619,22 @@ def construct_portfolio(
         if float(np.max(np.abs(w - w_prev))) < 1e-12:
             break
     notes += cap_notes
+
+    # Honest diagnostic: if the caps could not be jointly reconciled, say so rather than
+    # silently returning weights that breach one of them.
+    breaches: list[str] = []
+    if w.size and float(w.max()) > pcfg.max_position_weight + 1e-6:
+        breaches.append(f"a position exceeds {pcfg.max_position_weight:.0%}")
+    if secs is not None:
+        sect_tot: dict[str, float] = {}
+        for s_, wv in zip(secs, w, strict=True):
+            if s_ != "Unknown":
+                sect_tot[s_] = sect_tot.get(s_, 0.0) + float(wv)
+        if sect_tot and max(sect_tot.values()) > pcfg.max_sector_weight + 1e-6:
+            breaches.append(f"a sector exceeds {pcfg.max_sector_weight:.0%}")
+    if breaches:
+        notes.append("caps not fully reconciled (" + "; ".join(breaches) +
+                     ") - likely jointly too tight for this universe")
 
     # 5. Transparency: realized risk contributions + sector exposure of the final weights.
     rc = risk_contributions(cov, w)
