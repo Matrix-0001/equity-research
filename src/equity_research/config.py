@@ -48,6 +48,7 @@ class PortfolioConfig:
 
     # Capital-preservation guardrails.
     max_position_weight: float = 0.10   # hard cap per name (10%)
+    max_sector_weight: float = 0.30     # hard cap on aggregate weight per sector
     max_adv_participation: float = 0.05  # a position's $ value <= 5% of its ADV
     default_portfolio_value_usd: float = 1_000_000.0
 

@@ -9,6 +9,7 @@ refusal). No network.
 from __future__ import annotations
 
 import datetime as dt
+from dataclasses import replace
 
 import numpy as np
 import pandas as pd
@@ -116,6 +117,28 @@ def test_liquidity_cap_binds_illiquid_name():
     assert binding == [2]
     assert w.sum() == pytest.approx(1.0)  # excess redeployed to liquid names
     assert notes == []
+
+
+def test_sector_cap_redistributes_and_flags():
+    w, binding, notes = pf.apply_sector_cap(
+        np.array([0.35, 0.35, 0.30]), ["Tech", "Tech", "Energy"], cap=0.5)
+    assert w == pytest.approx([0.25, 0.25, 0.50])  # Tech scaled to cap, freed 0.2 -> Energy
+    assert binding == ["Tech"]
+    assert notes == []
+
+
+def test_sector_cap_infeasible_reports_undeployed():
+    w, binding, notes = pf.apply_sector_cap(np.array([0.6, 0.4]), ["Tech", "Tech"], cap=0.5)
+    assert w.sum() == pytest.approx(0.5)  # only one sector -> 0.5 cannot be deployed
+    assert binding == ["Tech"]
+    assert notes and "undeployed" in notes[0]
+
+
+def test_sector_cap_exempts_unknown():
+    # Unknown-sector names are not capped as a group, but can absorb redistribution.
+    w, binding, notes = pf.apply_sector_cap(np.array([0.6, 0.4]), ["Tech", "Unknown"], cap=0.5)
+    assert w == pytest.approx([0.5, 0.5])
+    assert binding == ["Tech"]
 
 
 def test_liquidity_cap_reports_undeployable_capital():
@@ -249,6 +272,27 @@ def test_construct_portfolio_end_to_end(tmp_path, method):
     assert (res.weights <= cfg.portfolio.max_position_weight + 1e-9).all()
     assert res.dropped == {}
     assert res.risk_contributions.sum() == pytest.approx(1.0, abs=1e-6)
+
+
+def test_construct_applies_sector_cap(tmp_path):
+    c, cfg, tickers = _small_universe(tmp_path)  # AA..EE, position cap already 0.40
+    cfg = replace(cfg, portfolio=replace(cfg.portfolio, max_sector_weight=0.40))
+    # 3 names in Tech, 1 Energy, 1 Unknown -> Tech (~0.6 unconstrained) must be reined to <= 0.40.
+    secs = pd.DataFrame({
+        "ticker": ["AA", "BB", "CC", "DD", "EE"],
+        "sector": ["Information Technology", "Information Technology", "Information Technology",
+                   "Energy", "Unknown"],
+    })
+    storage.load_table(c, secs, "securities")
+    try:
+        res = pf.construct_portfolio(c, AS_OF, tickers=tickers, method="risk_parity", cfg=cfg)
+    finally:
+        c.close()
+    assert res.sector_cap == 0.40
+    assert res.sector_weights  # realized per-sector exposure reported
+    assert res.sector_weights.get("Information Technology", 0.0) <= 0.40 + 1e-6
+    assert res.weights.sum() == pytest.approx(1.0, abs=1e-6)
+    assert any("exempt from the sector cap" in n for n in res.notes)  # the Unknown name
 
 
 def test_construct_kelly_without_mu_refuses(tmp_path):

@@ -49,12 +49,15 @@ Only: (a) translate computed metrics into plain-language theses / bull–bear ca
 and missing data. It never produces a numeric estimate of its own and never overrides a computed value.
 
 ## Current status
-**Phase 0 complete — Lane 1 (free) chosen; Sharadar is the planned upgrade. v1 working:
-factor screen + valuation + accounting-quality flags + full SecurityReport (with optional
-LLM bull/bear) + persistent universe.** Python 3.12 + `.venv` installed. EDGAR + Yahoo adapters
-built and live-validated; **64/64 tests pass** (point-in-time, survivorship-free universe, EDGAR
+**Phase 0 complete — Lane 1 (free) chosen; Sharadar is the planned upgrade. v1 + v2 complete:
+factor screen + valuation + accounting-quality flags + full SecurityReport (optional LLM bull/bear)
++ persistent universe; v2 portfolio construction (risk parity / HRP, fractional Kelly, position +
+sector + liquidity caps); FRED/ALFRED macro + rate/recession exposures.** Python 3.12 + `.venv`
+installed. EDGAR + Yahoo adapters
+built and live-validated; **86/86 tests pass** (point-in-time, survivorship-free universe, EDGAR
 flow-duration logic, factor math, flags, valuation, upsert persistence, report assembly, LLM parsing,
-v2 portfolio weighting / caps / Kelly, vintage-aware FRED/ALFRED macro, and macro exposure regressions).
+v2 portfolio weighting / position+sector+liquidity caps / Kelly, vintage-aware FRED/ALFRED macro,
+macro exposure regressions, and SIC->sector mapping).
 Stack: Python + DuckDB/Parquet.
 
 **Data sources (free, no subscription):**
@@ -71,7 +74,7 @@ the storage / point-in-time / universe / factor layers don't change.
 
 ### Quickstart
 ```
-.venv\Scripts\python -m pytest -q                                     # 64/64
+.venv\Scripts\python -m pytest -q                                     # 86/86
 .venv\Scripts\python -m equity_research.cli pull-sp500 --limit 50     # seed the universe (accumulates)
 .venv\Scripts\python -m equity_research.cli universe                  # what's loaded
 .venv\Scripts\python -m equity_research.cli screen                    # factor ranks, whole universe
@@ -98,12 +101,16 @@ the storage / point-in-time / universe / factor layers don't change.
 - Throughout: missing inputs read **"Not estimated"** with the reason, never a fabricated number
   (e.g. a bank's Altman Z and reverse-DCF correctly refuse rather than mislead).
 
-### What works today (v2, first slice)
+### What works today (v2, complete)
 - **`construct [TICKERS...] --method {inverse_variance,risk_parity,hrp}`** turns a basket (explicit
   names, or the top-N by factor composite) into diversified weights from a point-in-time covariance
-  matrix, then applies a hard **position cap** and a **liquidity cap** (position value vs. ADV).
-  Names with too little history or zero return variance are **dropped and listed**, never imputed.
-  Output shows weights, realized risk contributions, binding caps, and any un-deployable capital.
+  matrix, then applies hard **position, sector, and liquidity caps** -- iterated to a joint fixpoint so
+  all three hold at once (`--max-weight` / `--max-sector` override). Names with too little history or
+  zero return variance are **dropped and listed**, never imputed. Output shows weights, realized risk
+  contributions, sector exposure, binding caps, and any un-deployable capital.
+- **Sectors:** `pull-sectors` classifies names from SEC SIC codes into a coarse ~11-bucket sector map
+  (`securities` table) so the sector cap can bind. Honestly stamped **current SIC, coarse, not
+  point-in-time** (true PIT GICS membership is a Sharadar/Lane-2 upgrade).
 - **Fractional-Kelly** is wired to an explicit, user-supplied edge input:
   `construct --method kelly --edge AAPL=0.06 --edge MSFT=0.04` (or `--edge-file`, plus
   `--kelly-fraction` / `--max-weight`). Expected EXCESS returns are **your** inputs, echoed back as
@@ -118,5 +125,6 @@ the storage / point-in-time / universe / factor layers don't change.
   historical sensitivities and base rates, **never forecasts**; thin/absent samples read "Not estimated".
 
 ### Not built yet
-- v2 sector caps (need stored point-in-time sector data -- Lane 1 has none); v3 validated backtesting;
-  point-in-time index membership (needs Sharadar) for survivorship-free backtests.
+- **v2 is complete.** Next: v3 validated backtesting (walk-forward, costs netted, multi-regime stress,
+  deflated Sharpe) -- needs point-in-time index membership (Sharadar) for survivorship-free runs.
+  Smaller polish: portfolio-level macro exposures, multi-factor joint regression, true PIT GICS sectors.

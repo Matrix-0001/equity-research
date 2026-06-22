@@ -20,7 +20,7 @@ surface caveats. It never produces a number of its own and never overrides a com
 ## Stack & environment
 - Python 3.12 at `%LOCALAPPDATA%\Programs\Python\Python312`; project venv at `.venv`.
 - DuckDB + Parquet for local storage (`./data`, git-ignored). pandas/pyarrow.
-- Run tests: `.venv\Scripts\python -m pytest -q`  (currently **64/64 green**).
+- Run tests: `.venv\Scripts\python -m pytest -q`  (currently **86/86 green**).
 - Optional LLM: `pip install -e .[llm]` + `ANTHROPIC_API_KEY` (default model `claude-opus-4-8`,
   override `EQR_LLM_MODEL`). Without it, narratives read "Not estimated".
 
@@ -31,7 +31,8 @@ python -m equity_research.cli pull AAPL MSFT NVDA      # add/refresh specific na
 python -m equity_research.cli universe                 # what's loaded
 python -m equity_research.cli screen                   # factor percentile ranks, whole universe
 python -m equity_research.cli report AAPL              # full SecurityReport (+ optional LLM bull/bear)
-python -m equity_research.cli construct --method hrp   # risk-based weights + position/liquidity caps
+python -m equity_research.cli pull-sectors             # classify loaded names into sectors (SEC SIC)
+python -m equity_research.cli construct --method hrp   # risk-based weights + position/sector/liquidity caps
 python -m equity_research.cli construct --method kelly --edge AAPL=0.06 --edge MSFT=0.04  # your edges
 python -m equity_research.cli pull-macro               # FRED/ALFRED macro, vintage-aware (needs FRED_API_KEY)
 python -m equity_research.cli macro                    # macro values known as-of a date (no lookahead)
@@ -50,10 +51,12 @@ python -m equity_research.cli exposures AAPL           # rate/curve/credit betas
 - `data/reference.py` — current S&P 500 constituents (seed only; not point-in-time membership).
 - `data/fred.py` — FRED/ALFRED macro adapter (Lane 1). Pulls **vintages** (value as known at each
   date) into the `macro` table, so macro is point-in-time correct (no revision lookahead). Needs FRED_API_KEY.
+- `data/sectors.py` — sector classification from SEC SIC (submissions endpoint) -> `securities` table.
+  Coarse ~11-bucket map; **current SIC, not point-in-time** (true PIT GICS is a Sharadar upgrade).
 - `data/sharadar.py` — **deferred Lane-2 adapter**; same schema, switch on when a key is added.
 - `data/pit.py` — point-in-time access: `fundamentals_asof`, `prices_asof`, `annual_history`,
   `last_price`, `macro_asof` (latest vintage in force on `as_of`), `macro_series_asof` (full
-  vintage-correct macro time series for regressions).
+  vintage-correct macro time series for regressions), `sectors_for` (ticker -> sector).
 - `exposures.py` — macro rate/curve/credit **exposure betas** (univariate OLS of periodic returns
   on factor changes, PIT) + **recession base rate** by NBER (USREC) regime. Measured sensitivities
   and base rates, never forecasts; thin/absent samples read "Not estimated".
@@ -68,7 +71,7 @@ python -m equity_research.cli exposures AAPL           # rate/curve/credit betas
   requires an explicit expected-return vector -- the tool never fabricates `mu`). PIT covariance.
 - `llm.py` — bounded bull/bear narrative (optional; grounded only in computed figures).
 - `cli.py` — `pull` / `pull-sp500` / `universe` / `screen` / `report` / `construct` / `pull-macro` /
-  `macro` / `exposures`.
+  `macro` / `exposures` / `pull-sectors`.
 
 ## Status & data lane
 - **Phase 0 complete; v1 complete.** Data lane = **Lane 1 (free): EDGAR + Yahoo + (FRED planned)**.
@@ -77,10 +80,10 @@ python -m equity_research.cli exposures AAPL           # rate/curve/credit betas
 - See `docs/phase0_data_inventory.md` for the data honesty report and decision log.
 
 ## Not built yet (roadmap)
-- **v2 portfolio construction** — inverse-variance / ERC / HRP weighting, position + liquidity caps,
-  and **Kelly now wired to a CLI edge input** (`construct --method kelly --edge TICKER=EXCESS` /
-  `--edge-file`; `--kelly-fraction`, `--max-weight`). Expected returns are user-supplied and echoed as
-  assumptions; the tool never invents them. **Still to do:** sector caps (need stored PIT sector data).
+- **v2 portfolio construction is COMPLETE** — inverse-variance / ERC / HRP weighting; position,
+  **sector**, and liquidity caps (iterated to a joint fixpoint so all hold at once); Kelly wired to a
+  CLI edge input (`--edge`/`--edge-file`, `--kelly-fraction`, `--max-weight`, `--max-sector`). Sector
+  caps use SEC SIC (current, coarse, not point-in-time -- flagged; true PIT GICS is a Sharadar upgrade).
 - **Macro:** FRED/ALFRED adapter (vintage-aware `macro` table + `macro_asof`/`macro_series_asof`) **and
   the rate/recession exposure analytics are built** (`exposures.py`, `exposures` CLI): per-factor OLS
   betas to the 10Y / 10Y-2Y / HY spread + an NBER-regime base rate. Live-validated (FRED key set). Note:

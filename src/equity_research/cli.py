@@ -23,7 +23,7 @@ import pandas as pd
 
 from equity_research import exposures, factors, portfolio, report, universe
 from equity_research.config import config
-from equity_research.data import edgar, fred, pit, prices_free, reference, storage
+from equity_research.data import edgar, fred, pit, prices_free, reference, sectors, storage
 from equity_research.disclaimer import PERSISTENT_DISCLAIMER
 
 
@@ -39,6 +39,12 @@ def _pull(tickers: list[str], asof: dt.date) -> None:
     p = prices_free.ingest(up)
     print(f"Prices (Yahoo):           {p['rows']} rows | "
           f"resolved={p['tickers_resolved']} no_data={p['tickers_no_data']}")
+    try:
+        s = sectors.ingest_sectors(up)
+        print(f"Sectors (SEC SIC):        {s['rows']} rows | "
+              f"resolved={len(s['tickers_resolved'])} missing_cik={len(s['tickers_missing_cik'])}")
+    except Exception as exc:  # sector classification is best-effort; never fail a pull over it
+        print(f"Sectors (SEC SIC):        skipped ({exc})")
 
     conn = storage.connect()
     try:
@@ -108,6 +114,39 @@ def _universe(asof: dt.date) -> None:
     print(f"  pass liquidity/size screen as of {asof}: {n_pass}")
 
 
+def _pull_sectors(tickers: list[str]) -> None:
+    conn = storage.connect()
+    try:
+        if tickers:
+            names = [t.upper() for t in tickers]
+        elif storage.table_exists(conn, "fundamentals"):
+            names = sorted(r[0] for r in
+                           conn.execute("SELECT DISTINCT ticker FROM fundamentals").fetchall())
+        else:
+            names = []
+    finally:
+        conn.close()
+    if not names:
+        print("No tickers to classify. Pull some names first, or pass tickers explicitly.")
+        return
+    print(f"Fetching SIC sector classification for {len(names)} ticker(s) from SEC...\n")
+    s = sectors.ingest_sectors(names)
+    print(f"Classified {s['rows']} | resolved={len(s['tickers_resolved'])} "
+          f"missing_cik={len(s['tickers_missing_cik'])}\n")
+    conn = storage.connect()
+    try:
+        smap = pit.sectors_for(conn, names)
+    finally:
+        conn.close()
+    counts: dict[str, int] = {}
+    for sec in smap.values():
+        counts[sec] = counts.get(sec, 0) + 1
+    print("Sector breakdown of loaded names (current SIC, coarse, not point-in-time):")
+    for sec, c in sorted(counts.items(), key=lambda kv: -kv[1]):
+        print(f"  {sec:<24} {c}")
+    print(f"\n{PERSISTENT_DISCLAIMER}")
+
+
 def _exposures(ticker: str, asof: dt.date) -> None:
     conn = storage.connect()
     try:
@@ -162,7 +201,13 @@ def _pull_sp500(asof: dt.date, limit: int) -> None:
           f"missing_cik={len(f['tickers_missing_cik'])} no_facts={len(f['tickers_no_facts'])}")
     p = prices_free.ingest(syms)
     print(f"Prices:       {p['rows']} rows | resolved={len(p['tickers_resolved'])} "
-          f"no_data={len(p['tickers_no_data'])}\n")
+          f"no_data={len(p['tickers_no_data'])}")
+    try:
+        s = sectors.ingest_sectors(syms)
+        print(f"Sectors:      {s['rows']} rows | resolved={len(s['tickers_resolved'])} "
+              f"missing_cik={len(s['tickers_missing_cik'])}\n")
+    except Exception as exc:  # best-effort; never fail the seed over sectors
+        print(f"Sectors:      skipped ({exc})\n")
     _universe(asof)
 
 
@@ -200,12 +245,15 @@ def _parse_edges(pairs: list[str] | None, path: str | None) -> dict[str, float]:
 
 def _construct(tickers: list[str], asof: dt.date, method: str, top: int, value: float,
                edges: list[str] | None, edge_file: str | None,
-               kelly_fraction: float | None, max_weight: float | None) -> None:
+               kelly_fraction: float | None, max_weight: float | None,
+               max_sector: float | None) -> None:
     over: dict = {}
     if top and top > 0:
         over["default_top_n"] = top
     if max_weight is not None:
         over["max_position_weight"] = max_weight
+    if max_sector is not None:
+        over["max_sector_weight"] = max_sector
     cfg = replace(config, portfolio=replace(config.portfolio, **over)) if over else config
     mu = _parse_edges(edges, edge_file) or None
     conn = storage.connect()
@@ -257,6 +305,9 @@ def main(argv: list[str] | None = None) -> None:
     cons.add_argument("--max-weight", type=float, default=None,
                       help="per-position cap override (default "
                            f"{config.portfolio.max_position_weight})")
+    cons.add_argument("--max-sector", type=float, default=None,
+                      help="per-sector cap override (default "
+                           f"{config.portfolio.max_sector_weight}); needs pull-sectors")
     cons.add_argument("--top", type=int, default=config.portfolio.default_top_n,
                       help="how many names by factor composite when none are given")
     cons.add_argument("--value", type=float,
@@ -279,6 +330,11 @@ def main(argv: list[str] | None = None) -> None:
     pm.add_argument("--asof", default=dt.date.today().isoformat(),
                     help="point-in-time date (YYYY-MM-DD); default today")
 
+    ps = sub.add_parser("pull-sectors",
+                        help="Classify tickers into sectors from SEC SIC (enables the sector cap)")
+    ps.add_argument("tickers", nargs="*",
+                    help="tickers to classify; omit to backfill all loaded names")
+
     mac = sub.add_parser("macro", help="Show macro values known as of a date (ALFRED vintage)")
     mac.add_argument("--asof", default=dt.date.today().isoformat(),
                      help="point-in-time date (YYYY-MM-DD); default today")
@@ -298,13 +354,16 @@ def main(argv: list[str] | None = None) -> None:
     elif args.cmd == "construct":
         _construct(args.tickers, dt.date.fromisoformat(args.asof),
                    args.method, args.top, args.value,
-                   args.edge, args.edge_file, args.kelly_fraction, args.max_weight)
+                   args.edge, args.edge_file, args.kelly_fraction, args.max_weight,
+                   args.max_sector)
     elif args.cmd == "universe":
         _universe(dt.date.fromisoformat(args.asof))
     elif args.cmd == "pull-sp500":
         _pull_sp500(dt.date.fromisoformat(args.asof), args.limit)
     elif args.cmd == "pull-macro":
         _pull_macro(args.series, dt.date.fromisoformat(args.asof))
+    elif args.cmd == "pull-sectors":
+        _pull_sectors(args.tickers)
     elif args.cmd == "macro":
         _macro(dt.date.fromisoformat(args.asof))
     elif args.cmd == "exposures":

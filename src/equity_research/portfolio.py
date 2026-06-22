@@ -307,6 +307,55 @@ def apply_position_cap(
     return w, binding, notes
 
 
+def apply_sector_cap(
+    weights: np.ndarray, sectors: list[str], cap: float, unknown_label: str = "Unknown",
+    max_iter: int = 1000,
+) -> tuple[np.ndarray, list[str], list[str]]:
+    """Cap the AGGREGATE weight of each sector at `cap`, redistributing to non-binding sectors.
+
+    For any sector summing above `cap`, its names are scaled down pro-rata so the sector totals
+    `cap`; the freed weight is spread to names outside the binding sectors (pro-rata to current
+    weight). Iterated to a fixpoint. `unknown_label` names are exempt from the group cap (their
+    sector is indeterminate) -- they can still receive redistribution. Returns the capped weights,
+    the list of binding sector labels, and notes (incl. any un-deployable shortfall).
+    """
+    w = np.asarray(weights, dtype=float).copy()
+    n = len(w)
+    idx_of: dict[str, list[int]] = {}
+    for i, sec in enumerate(sectors):
+        idx_of.setdefault(sec, []).append(i)
+
+    binding: set[str] = set()
+    undeployed = 0.0
+    for _ in range(max_iter):
+        totals = {sec: float(w[ix].sum()) for sec, ix in idx_of.items()}
+        over = {sec for sec, tot in totals.items()
+                if sec != unknown_label and tot > cap + 1e-12}
+        if not over:
+            break
+        binding |= over
+        freed = 0.0
+        for sec in over:
+            scale = cap / totals[sec]
+            for i in idx_of[sec]:
+                freed += w[i] * (1.0 - scale)
+                w[i] *= scale
+        recip = [i for i in range(n) if sectors[i] not in over]
+        base = w[recip] if recip else np.empty(0)
+        if recip and base.sum() > 1e-12:
+            w[recip] += freed * base / base.sum()
+        elif recip:
+            w[recip] += freed / len(recip)
+        else:
+            undeployed += freed  # nowhere to place it (e.g. a single sector)
+            break
+
+    notes: list[str] = []
+    if undeployed > 1e-6:
+        notes.append(f"sector cap {cap:.0%} leaves {undeployed:.1%} undeployed (too few sectors)")
+    return w, sorted(binding), notes
+
+
 def apply_liquidity_cap(
     weights: np.ndarray,
     adv: np.ndarray,
@@ -381,6 +430,8 @@ class PortfolioResult:
     caps_binding: list[str] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
     assumptions: list[str] = field(default_factory=list)
+    sector_weights: dict[str, float] = field(default_factory=dict)
+    sector_cap: float | None = None
     selection: str = ""
     n_obs: int = 0
 
@@ -410,6 +461,14 @@ class PortfolioResult:
             lines.append("")
             lines.append("Expected returns used (USER-SUPPLIED inputs, NOT computed by this tool):")
             lines += [f"  - {a}" for a in self.assumptions]
+        if self.sector_weights:
+            lines.append("")
+            cap_str = f" (cap {self.sector_cap:.0%})" if self.sector_cap else ""
+            lines.append(f"Sector exposure{cap_str} - current SIC, coarse, not point-in-time:")
+            for sec, wv in self.sector_weights.items():
+                at_cap = (self.sector_cap is not None and sec != "Unknown"
+                          and wv >= self.sector_cap - 1e-9)
+                lines.append(f"  {sec:<24}{wv * 100:>6.1f}%{'  <= cap' if at_cap else ''}")
         if self.caps_binding:
             lines.append("")
             lines.append(f"Caps binding: {', '.join(self.caps_binding)}")
@@ -520,9 +579,18 @@ def construct_portfolio(
     else:
         raise ValueError(f"unknown method {method!r}; choose one of {WEIGHT_METHODS} or 'kelly'")
 
-    # 4. Guardrails: position cap, then liquidity cap.
-    w, pos_binding, pos_notes = apply_position_cap(w, pcfg.max_position_weight)
-    notes += pos_notes
+    # 4. Guardrails. Sector classification + ADV are fixed inputs; the three caps (position,
+    #    sector, liquidity) are then iterated to a JOINT fixpoint, so the final weights respect
+    #    all three at once -- not just whichever was applied last (a single pass lets a later cap's
+    #    redistribution push a name/sector back over an earlier cap).
+    sector_map = pit.sectors_for(conn, kept)
+    secs: list[str] | None = [sector_map.get(t, "Unknown") for t in kept] if sector_map else None
+    if secs is None:
+        notes.append("No sector data -> sector cap skipped (run pull-sectors to enable it).")
+    else:
+        n_unknown = sum(1 for s in secs if s == "Unknown")
+        if n_unknown:
+            notes.append(f"{n_unknown} name(s) lack a SIC sector -> exempt from the sector cap")
 
     scr = universe.screening_universe(conn, as_of, cfg)
     adv_map = scr.set_index("ticker")["avg_dollar_volume"].to_dict() if not scr.empty else {}
@@ -533,17 +601,39 @@ def construct_portfolio(
             f"{n_missing_adv} name(s) lack ADV (not in the liquid screen); the liquidity cap "
             f"could not be applied to them"
         )
-    w, liq_binding, liq_notes = apply_liquidity_cap(w, adv, pv, pcfg.max_adv_participation)
-    notes += liq_notes
 
-    # 5. Transparency: realized risk contributions of the final weights.
+    pos_binding: list[int] = []
+    liq_binding: list[int] = []
+    cap_notes: list[str] = []
+    for _ in range(50):  # converges in a few passes when the caps are jointly feasible
+        w_prev = w.copy()
+        w, pos_binding, pos_notes = apply_position_cap(w, pcfg.max_position_weight)
+        sec_notes: list[str] = []
+        if secs is not None:
+            w, _sector_binding, sec_notes = apply_sector_cap(w, secs, pcfg.max_sector_weight)
+        w, liq_binding, liq_notes = apply_liquidity_cap(w, adv, pv, pcfg.max_adv_participation)
+        cap_notes = pos_notes + sec_notes + liq_notes  # keep only the converged pass's notes
+        if float(np.max(np.abs(w - w_prev))) < 1e-12:
+            break
+    notes += cap_notes
+
+    # 5. Transparency: realized risk contributions + sector exposure of the final weights.
     rc = risk_contributions(cov, w)
     weights_series = pd.Series(w, index=kept).sort_values(ascending=False)
     rc_series = pd.Series(rc, index=kept).reindex(weights_series.index)
     caps_binding = sorted({kept[i] for i in pos_binding} | {kept[i] for i in liq_binding})
 
+    sector_weights: dict[str, float] = {}
+    if secs is not None:
+        agg: dict[str, float] = {}
+        for t, wv in weights_series.items():
+            agg[sector_map.get(t, "Unknown")] = agg.get(sector_map.get(t, "Unknown"), 0.0) + wv
+        sector_weights = dict(sorted(agg.items(), key=lambda kv: -kv[1]))
+
     return PortfolioResult(
         method, as_of, pv, weights=weights_series, risk_contributions=rc_series,
         dropped=ce.dropped, caps_binding=caps_binding, notes=notes,
-        assumptions=assumptions, selection=selection, n_obs=ce.n_obs,
+        assumptions=assumptions, sector_weights=sector_weights,
+        sector_cap=(pcfg.max_sector_weight if secs is not None else None),
+        selection=selection, n_obs=ce.n_obs,
     )

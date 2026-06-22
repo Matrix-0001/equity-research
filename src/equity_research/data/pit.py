@@ -128,6 +128,24 @@ def macro_asof(
     ).df()
 
 
+def sectors_for(
+    conn: duckdb.DuckDBPyConnection, tickers: list[str] | None = None
+) -> dict[str, str]:
+    """ticker -> sector from the `securities` table. Empty dict if the table isn't loaded yet.
+
+    (Sector classification is current SIC, not point-in-time; see data/sectors.py.)
+    """
+    exists = conn.execute(
+        "SELECT 1 FROM information_schema.tables WHERE table_name = 'securities'"
+    ).fetchone()
+    if not exists:
+        return {}
+    params: list = []
+    where = "1=1" + _in_filter([t.upper() for t in tickers] if tickers else None, params, "ticker")
+    rows = conn.execute(f"SELECT ticker, sector FROM securities WHERE {where}", params).fetchall()
+    return {r[0]: r[1] for r in rows}
+
+
 def macro_series_asof(
     conn: duckdb.DuckDBPyConnection,
     as_of: dt.date,
