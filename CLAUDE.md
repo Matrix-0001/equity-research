@@ -20,7 +20,7 @@ surface caveats. It never produces a number of its own and never overrides a com
 ## Stack & environment
 - Python 3.12 at `%LOCALAPPDATA%\Programs\Python\Python312`; project venv at `.venv`.
 - DuckDB + Parquet for local storage (`./data`, git-ignored). pandas/pyarrow.
-- Run tests: `.venv\Scripts\python -m pytest -q`  (currently **124/124 green**).
+- Run tests: `.venv\Scripts\python -m pytest -q`  (currently **136/136 green**).
 - Optional LLM: `pip install -e .[llm]` + `ANTHROPIC_API_KEY` (default model `claude-opus-4-8`,
   override `EQR_LLM_MODEL`). Without it, narratives read "Not estimated".
 
@@ -38,12 +38,16 @@ python -m equity_research.cli pull-macro               # FRED/ALFRED macro, vint
 python -m equity_research.cli macro                    # macro values known as-of a date (no lookahead)
 python -m equity_research.cli exposures AAPL           # rate/curve/credit betas + recession base rate
 python -m equity_research.cli backtest --strategy hrp --start 2024-07-01 --rebalance monthly  # v3 walk-forward, net of costs (free lane = INDICATIVE ONLY)
+python -m equity_research.cli pull-index-history       # survivorship-free PIT S&P 500 membership (fja05680, MIT)
+python -m equity_research.cli pull-simfin              # delisted-inclusive prices (SimFin free, >=2019; needs SIMFIN_API_KEY)
+python -m equity_research.cli backtest --lane simfin --strategy hrp --start 2021-07-01  # best-effort survivorship-free (use a dedicated EQR_DATA_DIR)
 ```
 
 ## Architecture (src/equity_research/)
 - `config.py` — all tunable assumptions in one auditable place (universe floors, SEC UA, FRED key,
-  LLM model, `PortfolioConfig`: covariance/caps/Kelly, `ExposureConfig`: regression freq/lookback/factors,
-  `BacktestConfig`: cost bps/impact/tax/cadence/initial capital/locked-test boundary).
+  `FMP_API_KEY` / `SIMFIN_API_KEY` (both from .env), LLM model, `PortfolioConfig`: covariance/caps/Kelly,
+  `ExposureConfig`: regression freq/lookback/factors, `BacktestConfig`: cost bps/impact/tax/cadence/
+  initial capital/locked-test boundary).
 - `disclaimer.py` — persistent disclaimer + `SecurityReport` dataclass (fields default to "Not
   estimated") + `BacktestResult` (net-of-cost stats, gross alongside, lane + validity stamp).
 - `data/storage.py` — DuckDB + versioned raw parquet snapshots; `upsert_by_ticker` (persistent universe).
@@ -54,6 +58,13 @@ python -m equity_research.cli backtest --strategy hrp --start 2024-07-01 --rebal
   Fetches full **daily** history via explicit `period1/period2` epoch window (the `range=max`
   keyword silently downsamples to quarterly — never used), so backtests span real regimes.
 - `data/reference.py` — current S&P 500 constituents (seed only; not point-in-time membership).
+- `data/index_membership.py` — **v3 Phase B** survivorship-free PIT S&P 500 membership windows from
+  `fja05680/sp500` (MIT) -> `index_membership` table (ticker, start_date, end_date); ~500 names/date
+  since 1996, multiple stints. Public facts only; optional `parse_symbol`/`delist_reasons` read
+  acquired/bankrupt codes from a Norgate-style export.
+- `data/simfin.py` — **v3 Phase B** SimFin v3 price adapter (free tier, ~2019+). Delisted-inclusive
+  daily prices (stable entity ids -> no ticker recycling) into the `prices` schema; closes the
+  delisted-price gap Yahoo can't. Pure `_parse_prices` is tested; live fetch retries + handles 429.
 - `data/fred.py` — FRED/ALFRED macro adapter (Lane 1). Pulls **vintages** (value as known at each
   date) into the `macro` table, so macro is point-in-time correct (no revision lookahead). Needs FRED_API_KEY.
 - `data/sectors.py` — sector classification from SEC SIC (submissions endpoint) -> `securities` table.
@@ -65,8 +76,9 @@ python -m equity_research.cli backtest --strategy hrp --start 2024-07-01 --rebal
 - `exposures.py` — macro rate/curve/credit **exposure betas** (univariate OLS of periodic returns
   on factor changes, PIT) + **recession base rate** by NBER (USREC) regime. Measured sensitivities
   and base rates, never forecasts; thin/absent samples read "Not estimated".
-- `universe.py` — `backtest_universe` (full, delisted-incl.) vs `screening_universe` (liquid floor);
-  market cap = shares × last price (vendor-agnostic).
+- `universe.py` — `backtest_universe` (full, delisted-incl.) vs `screening_universe` (liquid floor;
+  returns empty if prices/fundamentals tables are absent) vs `survivorship_universe` (PIT index
+  membership from `index_membership`, delisted names included). market cap = shares × last price.
 - `factors.py` — value/quality/profitability/momentum/low-vol as within-universe percentile ranks.
 - `valuation.py` — reverse-DCF *implied* growth (range over discount rates) + relative multiples vs peers.
 - `flags.py` — Piotroski F, Altman Z, Beneish M (scores + components + missing-list).
@@ -87,16 +99,20 @@ python -m equity_research.cli backtest --strategy hrp --start 2024-07-01 --rebal
   tax each rebalance; tracks net-of-cost NAV, per-period returns, turnover. Delisting-aware (stale
   holdings liquidated at last price, never silently survived). Reports the strategy against an
   **equal-weight 1/N benchmark** (same universe/costs) with excess CAGR. Strategies: hrp /
-  risk_parity / inverse_variance / composite / equal_weight. Free lane => every run "indicative only".
+  risk_parity / inverse_variance / composite / equal_weight. **Lanes:** `free` (Yahoo/screen ->
+  INDICATIVE ONLY) and **`simfin` (v3 Phase B): PIT membership + delisted prices -> best-effort
+  survivorship-free** (price-only strategies; composite refused; a delisted name's crash is felt).
 - `llm.py` — bounded bull/bear narrative (optional; grounded only in computed figures).
 - `cli.py` — `pull` / `pull-sp500` / `universe` / `screen` / `report` / `construct` / `pull-macro` /
-  `macro` / `exposures` / `pull-sectors` / `backtest`.
+  `macro` / `exposures` / `pull-sectors` / `backtest` / `pull-index-history` / `pull-simfin`.
 
 ## Status & data lane
-- **Phase 0 complete; v1 complete.** Data lane = **Lane 1 (free): EDGAR + Yahoo + (FRED planned)**.
-  Sharadar (Lane 2: point-in-time fundamentals + delisted prices + PIT index membership) is the
-  planned paid upgrade — the adapter exists; storage/PIT/universe/factor layers don't change.
-- See `docs/phase0_data_inventory.md` for the data honesty report and decision log.
+- **Phase 0 + v1 + v2 + v3 (Phase A & B) complete.** Data lanes are all **free**: EDGAR
+  fundamentals + Yahoo prices + FRED/ALFRED macro (v1/v2), and for v3 survivorship-free backtests,
+  **fja05680 PIT S&P membership (MIT) + SimFin free delisted prices (>=2019)**. Sharadar was
+  evaluated and declined (cost); its stub adapter remains but is unused.
+- See `docs/phase0_data_inventory.md` (data honesty report) and `docs/v3_backtesting.md` (v3 plan +
+  the free-DIY Phase B decision).
 
 ## Not built yet (roadmap)
 - **v2 portfolio construction is COMPLETE** — inverse-variance / ERC / HRP weighting; position,
@@ -107,13 +123,16 @@ python -m equity_research.cli backtest --strategy hrp --start 2024-07-01 --rebal
   the rate/recession exposure analytics are built** (`exposures.py`, `exposures` CLI): per-factor OLS
   betas to the 10Y / 10Y-2Y / HY spread + an NBER-regime base rate. Live-validated (FRED key set). Note:
   daily rate series are pulled plain (not revised); only CPI/UNRATE/USREC pull ALFRED vintages.
-- **v3 validated backtesting — Phase A COMPLETE (free lane, indicative-only).** Walk-forward engine
-  (`backtest.py`) + cost model (`costs.py`) + net-of-cost metrics (`metrics.py`) + `backtest` CLI.
-  Point-in-time and survivorship-free *at the engine level*; every run stamped "indicative only"
-  because free Yahoo prices are survivorship-biased and EDGAR has no PIT index membership. Sharpe
-  reported as a +/- 1 SE range. **Phase B (Sharadar, survivorship-free) and Phase C (locked test
-  set + Deflated Sharpe + multi-regime stress) are NOT built** — see `docs/v3_backtesting.md` §5/§7.
-  Phase B is gated on authorizing Sharadar spend (Darrell, not yet given).
+- **v3 backtesting — Phase A COMPLETE (free lane) + Phase B COMPLETE via a FREE DIY lane.**
+  Phase A: walk-forward engine (`backtest.py`) + cost model (`costs.py`) + net-of-cost metrics
+  (`metrics.py`) + equal-weight benchmark; free Yahoo lane is INDICATIVE ONLY (survivorship-biased).
+  **Phase B (best-effort survivorship-free, $0):** `--lane simfin` uses point-in-time S&P 500
+  membership (`fja05680`, MIT) + delisted-inclusive prices (SimFin free, >=2019). A held name that
+  delists now actually hurts the backtest. **Sharadar was NOT used** (too costly for a personal
+  project; SimFin free + fja05680 cover it). Honest limits: SimFin free history ~2019+ (no
+  GFC/dot-com); composite/factor strategies unsupported on this lane (no PIT fundamentals for
+  delisted names). **Phase C (locked test set + Deflated Sharpe + multi-regime stress) NOT built** —
+  see `docs/v3_backtesting.md`.
 
 ## Working norms
 - Tests for every new analytical piece; synthetic fixtures with hand-computed expected values.

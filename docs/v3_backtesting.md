@@ -90,13 +90,28 @@ authorize Sharadar and flip the lane for Phase B. Ask Darrell to confirm the spe
 
 - [x] **Lane for v3:** build **Phase A on free Lane-1 data first (indicative-only)** to prove the
       engine. *(Decided 2026-06-22 — see decision log below.)*
-- [ ] **Authorize Sharadar spend** for valid (survivorship-free) backtests, and confirm price +
-      non-professional license at signup (Phase 0 §7.1)? **Deferred** — no spend authorized yet;
-      Phase B stays unwritten until this box is ticked.
+- [x] **Phase B lane: FREE DIY (not Sharadar).** Sharadar declined on cost; Phase B built on
+      `fja05680` PIT membership (MIT) + SimFin free delisted prices. *(Decided 2026-06-23 — below.)*
 
-Until the lane is chosen, Phase B is not written. That gate is working as intended.
+Both gates resolved. Phase B is built on the free DIY lane; Phase C remains.
 
 ### Decision log
+
+**2026-06-23 - Phase B on a FREE DIY lane (Sharadar declined).** Darrell was unwilling to pay for
+Sharadar (~$100-150/mo) or even ~$22 (FMP) for a personal project. We confronted the data problem
+honestly: the survivorship gap is (a) a point-in-time universe and (b) delisted prices. (a) is public
+fact -> rebuilt for free from **fja05680/sp500** (MIT, Wikipedia-derived) PIT membership windows.
+(b) is the scarce piece; we verified Yahoo is unusable (drops recent delistings, returns
+recycled-ticker collisions for old ones), Stooq is bot-walled, and FMP's free tier gates delisted
+prices -- but **SimFin's free tier serves real delisted history (~2019+, stable entity ids)**: SIVB
+runs to a $0.01 close (SVB's actual collapse), PXD ends at its acquisition price. Built `--lane
+simfin`: basket = PIT membership (priced names), price-only strategies (hrp/risk_parity/
+inverse_variance/equal_weight) -> best-effort survivorship-free; a delisted name's crash is now felt.
+*Limits accepted:* SimFin free history ~2019+ (no GFC/dot-com); coverage gaps for some names/dates are
+excluded and reported (a coverage gap, not silent survivorship); composite/factor strategies need PIT
+fundamentals for delisted names (we only have EDGAR for current names) so they are refused on this
+lane. Stamp: BEST-EFFORT SURVIVORSHIP-FREE (not a pristine vendor-grade "valid"). The `sharadar.py`
+stub remains for a future upgrade but is unused.
 
 **2026-06-22 - Phase A on Lane 1 (free), indicative-only.** Build the walk-forward engine, the
 cost model, and the net-of-cost statistics on free EDGAR + Yahoo data first, to prove the machinery

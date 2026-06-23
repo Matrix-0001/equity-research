@@ -51,27 +51,32 @@ Only: (a) translate computed metrics into plain-language theses / bull–bear ca
 and missing data. It never produces a numeric estimate of its own and never overrides a computed value.
 
 ## Current status
-**Phase 0 complete — Lane 1 (free) chosen; Sharadar is the planned upgrade. v1 + v2 complete:
-factor screen + valuation + accounting-quality flags + full SecurityReport (optional LLM bull/bear)
-+ persistent universe; v2 portfolio construction (risk parity / HRP, fractional Kelly, position +
-sector + liquidity caps); FRED/ALFRED macro + rate/recession exposures. v3 Phase A complete:
-walk-forward backtest engine + transaction-cost model + net-of-cost metrics + equal-weight
-benchmark (free lane, every run stamped "indicative only").** Python 3.12 + `.venv`
-installed. EDGAR + Yahoo adapters
-built and live-validated; **124/124 tests pass** (point-in-time, survivorship-free universe, EDGAR
+**Phase 0 + v1 + v2 + v3 (Phase A & B) complete — all on FREE data.** v1: factor screen + valuation +
+accounting-quality flags + full SecurityReport (optional LLM bull/bear) + persistent universe. v2:
+portfolio construction (risk parity / HRP, fractional Kelly, position + sector + liquidity caps);
+FRED/ALFRED macro + rate/recession exposures. v3 Phase A: walk-forward backtest engine +
+transaction-cost model + net-of-cost metrics + equal-weight benchmark (free Yahoo lane = "indicative
+only"). **v3 Phase B: best-effort survivorship-free backtests for $0** — point-in-time S&P 500
+membership (fja05680, MIT) + delisted-inclusive prices (SimFin free, ~2019+); *Sharadar declined on
+cost.* Python 3.12 + `.venv`
+installed; **136/136 tests pass** (point-in-time, survivorship-free universe, EDGAR
 flow-duration logic, factor math, flags, valuation, upsert persistence, report assembly, LLM parsing,
 v2 portfolio weighting / position+sector+liquidity caps / Kelly, vintage-aware FRED/ALFRED macro,
-macro exposure regressions, SIC->sector mapping, and v3 cost model / metrics / walk-forward engine
-incl. no-lookahead, cost accounting, NAV compounding, delisting, cash conservation, and benchmark).
+macro exposure regressions, SIC->sector mapping, v3 cost model / metrics / walk-forward engine
+incl. no-lookahead, cost accounting, NAV compounding, delisting, cash conservation, benchmark, the
+SimFin price parser, PIT index membership, and a survivorship-lane test that a delisted crash is felt).
 Stack: Python + DuckDB/Parquet.
 
 **Data sources (free, no subscription):**
 - **Fundamentals:** SEC EDGAR `companyfacts` — as-reported, keyed on filing date → point-in-time.
   Curated us-gaap/dei concepts; quarterly vs annual durations disambiguated; tag migrations
   handled (e.g. NVDA revenue). (`data/edgar.py`)
-- **Prices:** Yahoo Finance chart API for current names, full **daily** history (`data/prices_free.py`).
-  *Survivorship-biased — backtests stay "indicative only" until a delisted-price source
-  (EODHD ~$20/mo or Sharadar) is added.*
+- **Prices (current names):** Yahoo Finance chart API, full **daily** history (`data/prices_free.py`).
+  *Survivorship-biased* — fine for the v1 screen and the "indicative" Phase A backtests.
+- **Prices (delisted-inclusive, ~2019+):** SimFin free tier (`data/simfin.py`) — stable entity ids,
+  keeps delisted history; powers the survivorship-free `--lane simfin` backtests. Needs `SIMFIN_API_KEY`.
+- **Index membership (point-in-time):** `fja05680/sp500` (MIT) via `data/index_membership.py` —
+  survivorship-free S&P 500 universe since 1996.
 - **Macro:** FRED/ALFRED (vintage / as-released) — adapter not built yet.
 
 Lane 2 (Sharadar) ingestion lives in `data/sharadar.py`, ready to switch on once a key is added —
@@ -146,10 +151,28 @@ the storage / point-in-time / universe / factor layers don't change.
   (so a run can span GFC/COVID/2022). **But on the free lane every run is stamped "indicative
   only"** -- Yahoo prices are survivorship-biased and EDGAR has no point-in-time index membership.
 
+### What works today (v3 Phase B -- best-effort survivorship-free, FREE)
+A survivorship-free backtest needs two things free Yahoo lacks: a point-in-time universe (which
+names were in the index over time, incl. delisted) and delisted prices. Both are now sourced for
+**$0**:
+- **`pull-index-history`** loads point-in-time S&P 500 membership from
+  [`fja05680/sp500`](https://github.com/fja05680/sp500) (MIT, Wikipedia-derived) -> `index_membership`
+  windows (~500 names/date since 1996). `universe.survivorship_universe(as_of)` gives exact PIT
+  membership, delisted names included.
+- **`pull-simfin`** pulls delisted-inclusive daily prices from **SimFin's free tier** (~2019+). SimFin
+  keys data by stable entity id, so a delisted name keeps its real history (e.g. SVB runs to a $0.01
+  final close) instead of Yahoo's recycled-ticker collisions. Needs a free `SIMFIN_API_KEY`.
+- **`backtest --lane simfin`** then runs survivorship-free: basket = the PIT membership (priced names),
+  weighted by hrp / risk_parity / inverse_variance / equal_weight. A held name that delists now
+  **actually hurts the portfolio**, as it must. Stamped *"best-effort survivorship-free"* (honest
+  limits: SimFin free starts ~2019, so no GFC/dot-com; composite/factor strategies need PIT
+  fundamentals for delisted names and are unsupported on this lane). Use a dedicated `EQR_DATA_DIR`
+  so SimFin and Yahoo prices don't mix.
+
+*Sharadar was evaluated and declined* -- too costly for a personal project; the free fja05680 + SimFin
+combination covers the survivorship requirement for recent years.
+
 ### Not built yet
-- **v3 Phase B (survivorship-free):** wire `data/sharadar.py` so backtest_universe is
-  delisted-inclusive with PIT index membership and the indicative stamp can drop -- **gated on
-  authorizing Sharadar spend** (Phase 0 / v3 spec §7; not yet given).
 - **v3 Phase C (out-of-sample discipline + stress):** locked test set + walk-forward enforcement,
   Deflated Sharpe (multiple-testing correction), and the multi-regime stress table.
 - Smaller polish: portfolio-level macro exposures, multi-factor joint regression, true PIT GICS sectors.
