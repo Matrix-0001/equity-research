@@ -165,6 +165,8 @@ class _Walk:
     empty_periods: int = 0
     delisting_liquidations: int = 0
     final_nav: float = 0.0
+    names: set[str] = field(default_factory=set)   # distinct tickers ever held (coverage signal)
+    holding_counts: list[int] = field(default_factory=list)  # names held per rebalance
 
 
 def _walk(
@@ -219,6 +221,9 @@ def _walk(
         w = _target_weights(conn, d, strategy, V, cfg, survivorship)
         if len(w) == 0:
             out.empty_periods += 1
+        held_names = [str(t) for t in w.index if float(w.get(t, 0.0)) > 0.0]
+        out.names.update(held_names)
+        out.holding_counts.append(len(held_names))
 
         # --- 4. Price the union of held + target names at d (to size trades in shares) ---
         target_names = [str(t) for t in w.index]
@@ -367,6 +372,12 @@ def run_backtest(
             "free Lane-1 prices are survivorship-biased and lack point-in-time index membership; "
             "this run validates the engine, it is not a defensible track record"
         )
+    if survivorship and len(strat.names) < 50:
+        notes.insert(0, (
+            f"LOW COVERAGE: only {len(strat.names)} distinct names were priced/traded (a full S&P "
+            f"universe is ~500). This run is NOT meaningfully survivorship-free -- load delisted "
+            f"prices with pull-simfin into THIS data dir (set EQR_DATA_DIR to a dedicated dir first)."
+        ))
 
     if not strat.net_rets:
         res = _empty("no holding-period returns were realized (universe empty throughout)")
@@ -402,6 +413,8 @@ def run_backtest(
         strategy=strategy, lane=lane, valid=False, start=start, end=end,
         rebalance=bt.rebalance, stamp=stamp, periods_per_year=ppy, n_periods=len(strat.net_rets),
         initial_capital=float(bt.initial_capital_usd), final_nav=float(strat.final_nav),
+        n_names_traded=len(strat.names),
+        avg_holdings=(float(np.mean(strat.holding_counts)) if strat.holding_counts else float("nan")),
         cagr_net=cagr_net,
         vol_net=metrics.annualized_volatility(strat.net_rets, ppy),
         sharpe_net=sharpe_net, sharpe_se=sharpe_se,

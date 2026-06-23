@@ -246,6 +246,7 @@ def test_engine_runs_end_to_end(tmp_path, strategy):
         c.close()
     assert res.n_periods >= 2
     assert res.final_nav > 0.0
+    assert res.n_names_traded > 0                          # coverage signal is populated
     assert np.isfinite(res.cagr_net)
     assert np.isfinite(res.vol_net)
     assert res.total_txn_cost > 0.0
@@ -297,6 +298,8 @@ def test_survivorship_lane_feels_a_delisted_crash(tmp_path):
     assert SURVIVORSHIP_STAMP in res.render()
     assert INDICATIVE_STAMP not in res.render()           # not the free-lane stamp
     assert res.n_periods >= 12
+    assert res.n_names_traded == 3                         # AA, BB, DEAD -- coverage is visible
+    assert any("LOW COVERAGE" in n for n in res.notes)     # 3 names is honestly flagged as thin
     navs = [v for _, v in res.nav_curve]
     worst = min(navs[i + 1] / navs[i] - 1.0 for i in range(len(navs) - 1))
     assert worst < -0.15                                   # DEAD's ~1/3 wipeout is felt

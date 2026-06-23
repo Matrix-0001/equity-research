@@ -129,6 +129,8 @@ class BacktestResult:
     n_periods: int = 0                     # number of realized holding periods
     initial_capital: float = 0.0
     final_nav: float = 0.0
+    n_names_traded: int = 0                # distinct tickers ever held (universe-coverage signal)
+    avg_holdings: float = float("nan")     # average names held per rebalance
     # Net (post-cost) headline.
     cagr_net: float = float("nan")
     vol_net: float = float("nan")
@@ -175,6 +177,9 @@ class BacktestResult:
             f"Data lane: {self.lane}   Validity: {stamp}",
             f"Periods: {self.n_periods} ({self.periods_per_year}/yr) | "
             f"capital ${self.initial_capital:,.0f} -> ${self.final_nav:,.0f}",
+            f"Universe: {self.n_names_traded} distinct names traded"
+            + (f" (avg {self.avg_holdings:.0f}/rebalance)"
+               if not math.isnan(self.avg_holdings) else ""),
             "",
             f"{'Metric':<22}{'Net (after costs)':>22}{'Gross (pre-cost)':>20}",
             f"{'CAGR':<22}{_fmt(self.cagr_net, pct=True):>22}{_fmt(self.cagr_gross, pct=True):>20}",

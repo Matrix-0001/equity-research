@@ -118,37 +118,45 @@ def ingest(
     cfg: Config = config,
     start: str = _FREE_HISTORY_START,
     snapshot_date: dt.date | None = None,
+    batch_size: int = 100,
 ) -> dict:
     """Fetch + load SimFin daily prices (delisted-inclusive) for `tickers` into the `prices` table.
 
-    Upserts by ticker (accumulates), like the other price adapters. `shares_outstanding` is kept in
-    the snapshot/prices frame so a survivorship-free universe can compute market cap.
+    Upserts by ticker (accumulates), like the other price adapters. Progress is persisted every
+    `batch_size` names (so a slow/interrupted full-universe pull is never wholly lost and re-running
+    resumes-by-refresh). `shares_outstanding` is kept so a survivorship-free universe can compute
+    market cap. A reproducibility snapshot of the full pull is written at the end.
     """
     snapshot_date = snapshot_date or dt.date.today()
     frames: list[pd.DataFrame] = []
     resolved: list[str] = []
     no_data: list[str] = []
-    for t in tickers:
-        df = fetch_prices(t, cfg, start=start)
-        if df.empty:
-            no_data.append(t.upper())
-        else:
-            frames.append(df)
-            resolved.append(t.upper())
-        time.sleep(_REQUEST_DELAY_S)
-
-    summary = {"rows": 0, "tickers_resolved": resolved, "tickers_no_data": no_data}
-    if not frames:
-        return summary
-    prices = pd.concat(frames, ignore_index=True)
+    total = len(tickers)
     conn = storage.connect(cfg)
     try:
+        for i, t in enumerate(tickers, start=1):
+            df = fetch_prices(t, cfg, start=start)
+            if df.empty:
+                no_data.append(t.upper())
+            else:
+                frames.append(df)
+                resolved.append(t.upper())
+            time.sleep(_REQUEST_DELAY_S)
+            if frames and i % batch_size == 0:           # persist progress periodically
+                storage.upsert_by_ticker(conn, pd.concat(frames, ignore_index=True), "prices")
+                print(f"  ... {i}/{total} pulled ({len(resolved)} resolved) - progress saved",
+                      flush=True)
+
+        summary = {"rows": 0, "tickers_resolved": resolved, "tickers_no_data": no_data}
+        if not frames:
+            return summary
+        prices = pd.concat(frames, ignore_index=True)
         storage.write_snapshot(
             conn, prices, "prices", source="SimFin v3 compact prices",
             vendor="simfin", snapshot_date=snapshot_date, cfg=cfg,
         )
         storage.upsert_by_ticker(conn, prices, "prices")
+        summary["rows"] = len(prices)
+        return summary
     finally:
         conn.close()
-    summary["rows"] = len(prices)
-    return summary
