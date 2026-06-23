@@ -43,6 +43,11 @@ python -m equity_research.cli pull-simfin              # delisted-inclusive pric
 python -m equity_research.cli backtest --lane simfin --strategy hrp --start 2021-07-01  # best-effort survivorship-free (use a dedicated EQR_DATA_DIR)
 ```
 
+**Convenience scripts (PowerShell):** `scripts\tour.ps1` runs one example of EVERY capability
+(v1 -> v2 -> v3 Phase A -> Phase B) with section banners (read-only, no pulls/commits) — the quickest
+way to see the whole app's output. `scripts\checkpoint.ps1 "msg"` runs the test suite then commits +
+pushes (only if green).
+
 ## Architecture (src/equity_research/)
 - `config.py` — all tunable assumptions in one auditable place (universe floors, SEC UA, FRED key,
   `FMP_API_KEY` / `SIMFIN_API_KEY` (both from .env), LLM model, `PortfolioConfig`: covariance/caps/Kelly,
