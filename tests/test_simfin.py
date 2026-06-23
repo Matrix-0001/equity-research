@@ -5,7 +5,8 @@ from __future__ import annotations
 import pandas as pd
 import pytest
 
-from equity_research.data import simfin
+from equity_research.config import Config
+from equity_research.data import simfin, storage
 
 # Shape of a real SimFin v3 /companies/prices/compact response (one company record with a
 # columns header + row-major data). Includes a delisted-style final near-zero close.
@@ -56,3 +57,34 @@ def test_parse_prices_empty_and_illformed_payloads():
 def test_parse_prices_uses_record_ticker_over_arg():
     df = simfin._parse_prices(_PAYLOAD, "wrong")
     assert (df["ticker"] == "SIVB").all()                 # trusts the payload's own ticker
+
+
+def _row(t):
+    return pd.DataFrame({"ticker": [t], "date": [pd.Timestamp("2020-01-02")], "closeadj": [5.0],
+                         "closeunadj": [5.0], "volume": [1], "shares_outstanding": [1]})
+
+
+def test_ingest_skips_existing_and_stops_gracefully_on_rate_limit(tmp_path, monkeypatch):
+    # Resumability: a name already in `prices` is skipped; a persistent 429 stops the run gracefully
+    # (rate_limited=True) rather than raising, so re-running resumes. No network (fetch is patched).
+    cfg = Config(data_dir=tmp_path)
+    c = storage.connect(cfg)
+    storage.load_table(c, _row("AAA"), "prices")          # AAA already pulled -> should be skipped
+    c.close()
+
+    calls: list[str] = []
+
+    def fake_fetch(ticker, cfg=None, start=None, **kw):
+        calls.append(ticker)
+        if ticker == "RL":
+            raise simfin.SimFinRateLimit("429")
+        return _row(ticker)
+
+    monkeypatch.setattr(simfin, "fetch_prices", fake_fetch)
+    monkeypatch.setattr(simfin.time, "sleep", lambda *_a, **_k: None)
+
+    s = simfin.ingest(["AAA", "BBB", "RL", "CCC"], cfg=cfg)
+    assert s["skipped"] == 1 and "AAA" not in calls        # existing name skipped, not refetched
+    assert s["rate_limited"] is True                       # hit the 429 -> stopped gracefully
+    assert "BBB" in s["tickers_resolved"]
+    assert "CCC" not in calls                              # stopped at RL; CCC left for a re-run

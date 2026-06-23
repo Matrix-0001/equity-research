@@ -30,8 +30,13 @@ from equity_research.data import storage
 
 _BASE = "https://backend.simfin.com/api/v3"
 _PRICES_PATH = "companies/prices/compact"
-_REQUEST_DELAY_S = 0.3
+_REQUEST_DELAY_S = 0.7  # gentler pacing to stay under the free-tier rate limit
 _FREE_HISTORY_START = "2019-01-01"  # free tier serves from ~2019-06; ask from Jan to be safe
+
+
+class SimFinRateLimit(RuntimeError):
+    """Raised when SimFin's free-tier rate limit (HTTP 429) persists; ingest stops gracefully so the
+    pull can be resumed later (already-pulled names are skipped)."""
 
 # SimFin "compact" column name -> our schema.
 _COL_DATE = "Date"
@@ -99,10 +104,12 @@ def fetch_prices(
         try:
             resp = requests.get(f"{_BASE}/{_PRICES_PATH}", headers=headers, params=params,
                                 timeout=60)
-            if resp.status_code == 429:  # rate limited -> back off and retry
-                last_exc = RuntimeError("SimFin rate limit (429)")
-                time.sleep(backoff_s * (attempt + 2))
-                continue
+            if resp.status_code == 429:  # rate limited
+                if attempt < retries - 1:
+                    wait = float(resp.headers.get("Retry-After") or backoff_s * (attempt + 1) * 4)
+                    time.sleep(min(wait, 90.0))
+                    continue
+                raise SimFinRateLimit("SimFin free-tier rate limit (429)")
             resp.raise_for_status()
             return _parse_prices(resp.json(), ticker)
         except requests.exceptions.RequestException as exc:
@@ -118,24 +125,42 @@ def ingest(
     cfg: Config = config,
     start: str = _FREE_HISTORY_START,
     snapshot_date: dt.date | None = None,
-    batch_size: int = 100,
+    batch_size: int = 50,
+    skip_existing: bool = True,
 ) -> dict:
     """Fetch + load SimFin daily prices (delisted-inclusive) for `tickers` into the `prices` table.
 
-    Upserts by ticker (accumulates), like the other price adapters. Progress is persisted every
-    `batch_size` names (so a slow/interrupted full-universe pull is never wholly lost and re-running
-    resumes-by-refresh). `shares_outstanding` is kept so a survivorship-free universe can compute
-    market cap. A reproducibility snapshot of the full pull is written at the end.
+    RESUMABLE: with `skip_existing` (default), tickers already in the `prices` table are skipped, so a
+    big pull that the free-tier rate limit cut short can simply be RE-RUN to continue. Progress is
+    upserted every `batch_size` names, and a persistent 429 stops the run gracefully (`rate_limited`
+    in the summary) rather than raising. `shares_outstanding` is kept so a survivorship-free universe
+    can compute market cap. NOTE: run this into a dedicated `EQR_DATA_DIR` (e.g. ./data_simfin) so
+    SimFin prices don't mix with Yahoo's (different adjustment methodologies).
     """
     snapshot_date = snapshot_date or dt.date.today()
-    frames: list[pd.DataFrame] = []
-    resolved: list[str] = []
-    no_data: list[str] = []
-    total = len(tickers)
     conn = storage.connect(cfg)
     try:
-        for i, t in enumerate(tickers, start=1):
-            df = fetch_prices(t, cfg, start=start)
+        already: set[str] = set()
+        if skip_existing and storage.table_exists(conn, "prices"):
+            already = {r[0] for r in conn.execute("SELECT DISTINCT ticker FROM prices").fetchall()}
+        todo = [t for t in tickers if t.upper() not in already]
+        skipped = len(tickers) - len(todo)
+
+        frames: list[pd.DataFrame] = []
+        resolved: list[str] = []
+        no_data: list[str] = []
+        rate_limited = False
+        total = len(todo)
+        for i, t in enumerate(todo, start=1):
+            try:
+                df = fetch_prices(t, cfg, start=start)
+            except SimFinRateLimit:
+                rate_limited = True
+                break                                    # stop gracefully; re-run to resume
+            except Exception:
+                no_data.append(t.upper())                # one bad name shouldn't abort the pull
+                time.sleep(_REQUEST_DELAY_S)
+                continue
             if df.empty:
                 no_data.append(t.upper())
             else:
@@ -147,16 +172,16 @@ def ingest(
                 print(f"  ... {i}/{total} pulled ({len(resolved)} resolved) - progress saved",
                       flush=True)
 
-        summary = {"rows": 0, "tickers_resolved": resolved, "tickers_no_data": no_data}
-        if not frames:
-            return summary
-        prices = pd.concat(frames, ignore_index=True)
-        storage.write_snapshot(
-            conn, prices, "prices", source="SimFin v3 compact prices",
-            vendor="simfin", snapshot_date=snapshot_date, cfg=cfg,
-        )
-        storage.upsert_by_ticker(conn, prices, "prices")
-        summary["rows"] = len(prices)
-        return summary
+        rows = 0
+        if frames:
+            prices = pd.concat(frames, ignore_index=True)
+            storage.write_snapshot(
+                conn, prices, "prices", source="SimFin v3 compact prices",
+                vendor="simfin", snapshot_date=snapshot_date, cfg=cfg,
+            )
+            storage.upsert_by_ticker(conn, prices, "prices")
+            rows = len(prices)
+        return {"rows": rows, "tickers_resolved": resolved, "tickers_no_data": no_data,
+                "skipped": skipped, "rate_limited": rate_limited}
     finally:
         conn.close()

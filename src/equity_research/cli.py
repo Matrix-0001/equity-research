@@ -315,11 +315,16 @@ def _pull_simfin(tickers: list[str], start: str) -> None:
         print(f"Cannot pull from SimFin: {exc}")
         return
     print(f"SimFin prices (delisted-inclusive): {s['rows']} rows | "
-          f"resolved={len(s['tickers_resolved'])} no_data={len(s['tickers_no_data'])}")
+          f"resolved={len(s['tickers_resolved'])} no_data={len(s['tickers_no_data'])} "
+          f"skipped(already had)={s.get('skipped', 0)}")
     if s["tickers_no_data"]:
         sample = ", ".join(s["tickers_no_data"][:12])
         print(f"  no data (older than free ~2019 window, or uncovered): {sample}"
               f"{' ...' if len(s['tickers_no_data']) > 12 else ''}")
+    if s.get("rate_limited"):
+        print("\nStopped early on SimFin's free-tier rate limit (429). Progress is SAVED. "
+              "Wait ~a minute, then RE-RUN this exact command to resume -- already-pulled names "
+              "are skipped automatically.")
     print(f"\n{PERSISTENT_DISCLAIMER}")
 
 
