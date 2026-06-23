@@ -298,17 +298,23 @@ def _pull_simfin(tickers: list[str], start: str) -> None:
     else:
         conn = storage.connect()
         try:
-            names = sorted({r[0] for r in
-                            conn.execute("SELECT DISTINCT ticker FROM index_membership").fetchall()}) \
-                if storage.table_exists(conn, "index_membership") else []
+            if not storage.table_exists(conn, "index_membership"):
+                names = []
+            else:
+                # Only members whose index window reaches the SimFin free window (>= `start`).
+                # Names that delisted before then have no SimFin data -- skip them so we don't
+                # re-fetch un-resolvable tickers every run.
+                names = sorted({r[0] for r in conn.execute(
+                    "SELECT DISTINCT ticker FROM index_membership "
+                    "WHERE end_date IS NULL OR end_date >= ?", [start]).fetchall()})
         finally:
             conn.close()
         if not names:
             print("No tickers given and no index_membership loaded. Run pull-index-history first, "
                   "or pass tickers explicitly.")
             return
-        print(f"Pulling the full survivorship universe ({len(names)} names) from SimFin - this is "
-              f"rate-limited and can take several minutes...")
+        print(f"Pulling the survivorship universe active since {start} ({len(names)} names) from "
+              f"SimFin - rate-limited; re-run to resume (already-pulled names are skipped).")
     try:
         s = simfin.ingest(names, start=start)
     except RuntimeError as exc:
