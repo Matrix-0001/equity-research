@@ -14,6 +14,8 @@ env/
 # Data — never commit licensed/raw market data (license + size).
 # Anchored to repo root so it does NOT match the src/equity_research/data/ package.
 /data/
+/data_simfin/
+/data_*/
 *.parquet
 *.duckdb
 *.sqlite
