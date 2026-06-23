@@ -24,7 +24,7 @@ import pandas as pd
 from equity_research import backtest, exposures, factors, portfolio, report, universe
 from equity_research.config import config
 from equity_research.data import (
-    edgar, fred, index_membership, pit, prices_free, reference, sectors, storage,
+    edgar, fred, index_membership, pit, prices_free, reference, sectors, simfin, storage,
 )
 from equity_research.disclaimer import PERSISTENT_DISCLAIMER
 
@@ -292,6 +292,37 @@ def _pull_index_history(source: str | None) -> None:
     print(f"\n{PERSISTENT_DISCLAIMER}")
 
 
+def _pull_simfin(tickers: list[str], start: str) -> None:
+    if tickers:
+        names = [t.upper() for t in tickers]
+    else:
+        conn = storage.connect()
+        try:
+            names = sorted({r[0] for r in
+                            conn.execute("SELECT DISTINCT ticker FROM index_membership").fetchall()}) \
+                if storage.table_exists(conn, "index_membership") else []
+        finally:
+            conn.close()
+        if not names:
+            print("No tickers given and no index_membership loaded. Run pull-index-history first, "
+                  "or pass tickers explicitly.")
+            return
+        print(f"Pulling the full survivorship universe ({len(names)} names) from SimFin - this is "
+              f"rate-limited and can take several minutes...")
+    try:
+        s = simfin.ingest(names, start=start)
+    except RuntimeError as exc:
+        print(f"Cannot pull from SimFin: {exc}")
+        return
+    print(f"SimFin prices (delisted-inclusive): {s['rows']} rows | "
+          f"resolved={len(s['tickers_resolved'])} no_data={len(s['tickers_no_data'])}")
+    if s["tickers_no_data"]:
+        sample = ", ".join(s["tickers_no_data"][:12])
+        print(f"  no data (older than free ~2019 window, or uncovered): {sample}"
+              f"{' ...' if len(s['tickers_no_data']) > 12 else ''}")
+    print(f"\n{PERSISTENT_DISCLAIMER}")
+
+
 def _backtest(strategy: str, start: dt.date, end: dt.date, rebalance: str, lane: str,
               value: float | None, tax: float | None) -> None:
     over: dict = {}
@@ -384,7 +415,16 @@ def main(argv: list[str] | None = None) -> None:
         help="Load survivorship-free S&P 500 membership (current + delisted) for the backtest universe",
     )
     pih.add_argument("--source", default=None,
-                     help="CSV path or URL of the membership export (default: shared sheet)")
+                     help="CSV path or URL of the membership export (default: fja05680/sp500)")
+
+    psf = sub.add_parser(
+        "pull-simfin",
+        help="Pull delisted-inclusive prices from SimFin (free tier; ~2019+) for survivorship-free backtests",
+    )
+    psf.add_argument("tickers", nargs="*",
+                     help="tickers to pull; omit to pull the whole loaded index_membership universe")
+    psf.add_argument("--start", default=simfin._FREE_HISTORY_START,
+                     help="history start (YYYY-MM-DD); free tier serves from ~2019-06")
 
     mac = sub.add_parser("macro", help="Show macro values known as of a date (ALFRED vintage)")
     mac.add_argument("--asof", default=dt.date.today().isoformat(),
@@ -406,8 +446,9 @@ def main(argv: list[str] | None = None) -> None:
                     help="backtest end date (YYYY-MM-DD); default today")
     bt.add_argument("--rebalance", default=config.backtest.rebalance,
                     choices=["monthly", "quarterly"], help="rebalance cadence")
-    bt.add_argument("--lane", default="free", choices=["free", "sharadar"],
-                    help="data lane; only 'free' is built (Phase A). 'sharadar' is Phase B.")
+    bt.add_argument("--lane", default="free", choices=["free", "simfin", "sharadar"],
+                    help="'free' = Yahoo/screen (indicative); 'simfin' = PIT membership + delisted "
+                         "prices (best-effort survivorship-free, needs pull-index-history + pull-simfin)")
     bt.add_argument("--value", type=float, default=None,
                     help=f"initial capital (default {config.backtest.initial_capital_usd:,.0f})")
     bt.add_argument("--tax", type=float, default=None,
@@ -436,6 +477,8 @@ def main(argv: list[str] | None = None) -> None:
         _pull_sectors(args.tickers)
     elif args.cmd == "pull-index-history":
         _pull_index_history(args.source)
+    elif args.cmd == "pull-simfin":
+        _pull_simfin(args.tickers, args.start)
     elif args.cmd == "macro":
         _macro(dt.date.fromisoformat(args.asof))
     elif args.cmd == "exposures":

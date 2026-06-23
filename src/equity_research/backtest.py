@@ -38,7 +38,7 @@ import pandas as pd
 from equity_research import costs, factors, metrics, portfolio, universe
 from equity_research.config import BacktestConfig, Config, config
 from equity_research.data import pit
-from equity_research.disclaimer import BacktestResult
+from equity_research.disclaimer import INDICATIVE_STAMP, SURVIVORSHIP_STAMP, BacktestResult
 
 # "equal_weight" is both a runnable strategy and the default benchmark (naive 1/N diversification).
 STRATEGIES = ("hrp", "risk_parity", "inverse_variance", "composite", "equal_weight")
@@ -97,6 +97,7 @@ def _target_weights(
     strategy: str,
     portfolio_value: float,
     cfg: Config,
+    survivorship: bool = False,
 ) -> pd.Series:
     """Target weights at `as_of` for the chosen fixed strategy (empty Series if none investable).
 
@@ -104,8 +105,32 @@ def _target_weights(
     position/sector/liquidity caps, sized to `portfolio_value`. "composite" equal-weights the top-N
     names by factor composite; "equal_weight" equal-weights the WHOLE investable universe (the
     naive 1/N benchmark). The last two are simple, transparent rules with no caps.
+
+    When `survivorship` is set, the basket is the point-in-time index membership
+    (`universe.survivorship_universe`, delisted names included) restricted to names that actually
+    have a price on `as_of` -- so price-only strategies are survivorship-free among covered names.
+    Composite is unsupported here (it needs point-in-time fundamentals for the delisted names).
     """
     strategy = strategy.lower()
+    if survivorship:
+        basket = universe.survivorship_universe(conn, as_of)
+        if basket:
+            priced = _close_on(conn, as_of, basket)
+            basket = [t for t in basket if t in priced]
+        if not basket:
+            return pd.Series(dtype="float64")
+        if strategy in ("hrp", "risk_parity", "inverse_variance"):
+            res = portfolio.construct_portfolio(
+                conn, as_of, tickers=basket, method=strategy, cfg=cfg,
+                portfolio_value=portfolio_value,
+            )
+            if res.weights is None or len(res.weights) == 0:
+                return pd.Series(dtype="float64")
+            return res.weights.astype("float64")
+        if strategy == "equal_weight":
+            return pd.Series(1.0 / len(basket), index=basket, dtype="float64")
+        raise ValueError(f"strategy {strategy!r} is not supported in the survivorship lane")
+
     if strategy in ("hrp", "risk_parity", "inverse_variance"):
         res = portfolio.construct_portfolio(
             conn, as_of, method=strategy, cfg=cfg, portfolio_value=portfolio_value
@@ -148,6 +173,7 @@ def _walk(
     strategy: str,
     cfg: Config,
     bt: BacktestConfig,
+    survivorship: bool = False,
 ) -> _Walk:
     """Run one strategy over `rdates`, returning the net/gross return path, costs, and diagnostics."""
     units: dict[str, float] = {}     # ticker -> shares of the adjusted-price series
@@ -190,7 +216,7 @@ def _walk(
             break
 
         # --- 3. Choose target weights using only data <= d ---
-        w = _target_weights(conn, d, strategy, V, cfg)
+        w = _target_weights(conn, d, strategy, V, cfg, survivorship)
         if len(w) == 0:
             out.empty_periods += 1
 
@@ -271,13 +297,18 @@ def run_backtest(
 ) -> BacktestResult:
     """Run a walk-forward, net-of-cost backtest of `strategy` over [start, end], vs an equal-weight benchmark.
 
-    Phase A only supports `lane="free"` (always indicative-only). `lane="sharadar"` is Phase B and
-    is refused here rather than silently producing an invalid-but-unstamped result.
+    Lanes:
+      - "free"   -- Yahoo prices, liquid-screen universe; survivorship-biased -> INDICATIVE ONLY.
+      - "simfin" -- point-in-time index membership (fja05680) + delisted prices (SimFin >=2019);
+        best-effort survivorship-free. Price-only strategies (hrp/risk_parity/inverse_variance/
+        equal_weight) are supported; composite needs PIT fundamentals for delisted names and is not.
+      - "sharadar" -- a future paid upgrade; refused rather than faked.
     """
     bt = bt or cfg.backtest
     strategy = strategy.lower()
     ppy, rdates = _rebalance_dates(start, end, bt.rebalance)
     rf = bt.risk_free_annual / ppy
+    survivorship = lane == "simfin"
 
     assumptions = [
         f"half-spread {bt.spread_bps:.1f} bps + commission {bt.commission_bps:.1f} bps per trade",
@@ -288,24 +319,31 @@ def run_backtest(
         f"risk-free rate {bt.risk_free_annual:.1%}/yr for Sharpe/Sortino",
     ]
 
+    stamp = SURVIVORSHIP_STAMP if survivorship else INDICATIVE_STAMP
+
     def _empty(note: str) -> BacktestResult:
         return BacktestResult(
             strategy=strategy, lane=lane, valid=False, start=start, end=end,
-            rebalance=bt.rebalance, periods_per_year=ppy, n_periods=0,
+            rebalance=bt.rebalance, stamp=stamp, periods_per_year=ppy, n_periods=0,
             initial_capital=bt.initial_capital_usd, final_nav=bt.initial_capital_usd,
             cost_assumptions=assumptions, notes=[note],
         )
 
-    if lane != "free":
+    if lane not in ("free", "simfin"):
         return _empty(
-            f"lane '{lane}' is not built yet (Phase B / Sharadar). Phase A runs free/indicative-only."
+            f"lane '{lane}' is not built (use 'free' or 'simfin'); Sharadar is a future paid upgrade."
+        )
+    if survivorship and strategy == "composite":
+        return _empty(
+            "the survivorship (simfin) lane needs point-in-time fundamentals for delisted names, "
+            "which we don't have; use hrp / risk_parity / inverse_variance / equal_weight."
         )
     if len(rdates) < 2:
         return _empty(
             f"need at least two {bt.rebalance} rebalance dates in [{start}, {end}]; got {len(rdates)}"
         )
 
-    strat = _walk(conn, rdates, strategy, cfg, bt)
+    strat = _walk(conn, rdates, strategy, cfg, bt, survivorship)
 
     notes: list[str] = []
     if strat.empty_periods:
@@ -318,10 +356,17 @@ def run_backtest(
             f"{strat.delisting_liquidations} holding(s) went stale/delisted mid-run and were "
             f"liquidated at their last observed price (delisting outcomes are unknown on free data)"
         )
-    notes.append(
-        "free Lane-1 prices are survivorship-biased and lack point-in-time index membership; "
-        "this run validates the engine, it is not a defensible track record"
-    )
+    if survivorship:
+        notes.append(
+            "survivorship-free via point-in-time index membership (fja05680) + delisted prices "
+            "(SimFin free, >=2019); names/dates SimFin does not cover are excluded (coverage gap, "
+            "not survivorship). Composite/factor strategies need PIT fundamentals and are unsupported here."
+        )
+    else:
+        notes.append(
+            "free Lane-1 prices are survivorship-biased and lack point-in-time index membership; "
+            "this run validates the engine, it is not a defensible track record"
+        )
 
     if not strat.net_rets:
         res = _empty("no holding-period returns were realized (universe empty throughout)")
@@ -343,7 +388,7 @@ def run_backtest(
     bench_label = ""
     bench_cagr = bench_vol = bench_sharpe = bench_mdd = excess = float("nan")
     if strategy != BENCHMARK:
-        bench = _walk(conn, rdates, BENCHMARK, cfg, bt)
+        bench = _walk(conn, rdates, BENCHMARK, cfg, bt, survivorship)
         if bench.net_rets:
             bench_label = "equal-weight 1/N investable universe, net of same costs"
             bench_cagr = metrics.cagr(bench.net_rets, ppy)
@@ -355,7 +400,7 @@ def run_backtest(
 
     return BacktestResult(
         strategy=strategy, lane=lane, valid=False, start=start, end=end,
-        rebalance=bt.rebalance, periods_per_year=ppy, n_periods=len(strat.net_rets),
+        rebalance=bt.rebalance, stamp=stamp, periods_per_year=ppy, n_periods=len(strat.net_rets),
         initial_capital=float(bt.initial_capital_usd), final_nav=float(strat.final_nav),
         cagr_net=cagr_net,
         vol_net=metrics.annualized_volatility(strat.net_rets, ppy),

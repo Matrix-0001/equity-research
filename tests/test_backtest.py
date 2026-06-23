@@ -17,7 +17,7 @@ import pytest
 from equity_research import backtest as bt
 from equity_research.config import BacktestConfig, Config, PortfolioConfig
 from equity_research.data import storage
-from equity_research.disclaimer import INDICATIVE_STAMP
+from equity_research.disclaimer import INDICATIVE_STAMP, SURVIVORSHIP_STAMP
 
 ZERO_COST = BacktestConfig(spread_bps=0.0, commission_bps=0.0, impact_coef=0.0,
                            tax_rate=0.0, rebalance="monthly", initial_capital_usd=1_000_000.0)
@@ -265,6 +265,55 @@ def test_sharadar_lane_is_refused_until_phase_b(tmp_path):
     assert res.valid is False
     assert res.n_periods == 0
     assert any("Phase B" in n or "not built" in n for n in res.notes)
+
+
+def test_survivorship_lane_feels_a_delisted_crash(tmp_path):
+    # The whole point of survivorship-free: a held name that delists/crashes HURTS the portfolio.
+    # AA/BB trade throughout; DEAD is an index member until 2021-06 then collapses 40 -> ~0 and is
+    # removed. equal_weight holds ~1/3 in DEAD, so the crash must show as a big negative month --
+    # which a survivorship-BIASED run (DEAD silently absent) would never feel.
+    c, cfg = _connect(tmp_path, min_return_obs=20, cov_lookback_days=400)
+    days = pd.bdate_range("2019-01-01", "2022-06-30")
+    rng = np.random.default_rng(3)
+    storage.load_table(c, _prices("AA", days, 50 * np.cumprod(1 + rng.normal(0.0003, 0.01, len(days)))),
+                       "prices")
+    storage.upsert_by_ticker(
+        c, _prices("BB", days, 50 * np.cumprod(1 + rng.normal(0.0003, 0.01, len(days)))), "prices")
+    dead = [40.0 if d <= pd.Timestamp("2021-05-15") else 0.01 for d in days]  # collapse, then padded
+    storage.upsert_by_ticker(c, _prices("DEAD", days, dead), "prices")
+    mem = pd.DataFrame({
+        "ticker": ["AA", "BB", "DEAD"],
+        "start_date": [pd.Timestamp("2019-01-02")] * 3,
+        "end_date": [pd.NaT, pd.NaT, pd.Timestamp("2021-06-01")],   # DEAD leaves the index 2021-06
+        "source": ["test"] * 3,
+    })
+    storage.load_table(c, mem, "index_membership")
+    try:
+        res = bt.run_backtest(c, dt.date(2020, 6, 30), dt.date(2022, 6, 30),
+                              strategy="equal_weight", cfg=cfg, bt=ZERO_COST, lane="simfin")
+    finally:
+        c.close()
+    assert res.lane == "simfin"
+    assert SURVIVORSHIP_STAMP in res.render()
+    assert INDICATIVE_STAMP not in res.render()           # not the free-lane stamp
+    assert res.n_periods >= 12
+    navs = [v for _, v in res.nav_curve]
+    worst = min(navs[i + 1] / navs[i] - 1.0 for i in range(len(navs) - 1))
+    assert worst < -0.15                                   # DEAD's ~1/3 wipeout is felt
+
+
+def test_survivorship_lane_refuses_composite(tmp_path):
+    c, cfg = _connect(tmp_path)
+    mem = pd.DataFrame({"ticker": ["AA"], "start_date": [pd.Timestamp("2019-01-02")],
+                        "end_date": [pd.NaT], "source": ["test"]})
+    storage.load_table(c, mem, "index_membership")
+    try:
+        res = bt.run_backtest(c, dt.date(2020, 6, 30), dt.date(2021, 6, 30),
+                              strategy="composite", cfg=cfg, bt=ZERO_COST, lane="simfin")
+    finally:
+        c.close()
+    assert res.n_periods == 0
+    assert any("point-in-time fundamentals" in n for n in res.notes)
 
 
 def test_too_few_rebalance_dates_refuses(tmp_path):

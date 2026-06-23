@@ -23,7 +23,7 @@ import duckdb
 import pandas as pd
 
 from equity_research.config import Config, config
-from equity_research.data import pit
+from equity_research.data import pit, storage
 
 
 def backtest_universe(conn: duckdb.DuckDBPyConnection, as_of: dt.date) -> list[str]:
@@ -71,11 +71,15 @@ def screening_universe(
     """
     floor = cfg.universe_floor
     window = floor.avg_dollar_volume_window_days
+    empty = pd.DataFrame(columns=["ticker", "market_cap", "avg_dollar_volume", "last_price"])
+
+    # The liquid screen needs both prices and fundamentals; the survivorship (SimFin price-only)
+    # lane may have no fundamentals table at all -> return empty rather than raising.
+    if not (storage.table_exists(conn, "prices") and storage.table_exists(conn, "fundamentals")):
+        return empty
 
     prices = pit.prices_asof(conn, as_of, lookback_days=window * 2)
     funds = pit.fundamentals_asof(conn, as_of)
-
-    empty = pd.DataFrame(columns=["ticker", "market_cap", "avg_dollar_volume", "last_price"])
     if prices.empty or funds.empty or "shares_outstanding" not in funds.columns:
         return empty
 

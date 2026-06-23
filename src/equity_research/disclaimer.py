@@ -83,8 +83,15 @@ class SecurityReport:
 
 
 # Stamp applied to every run whose data lane cannot satisfy non-negotiable #2 (survivorship-free,
-# point-in-time index membership). Free Lane-1 data never can, so Phase A runs always carry it.
+# point-in-time index membership). Free Lane-1 data (Yahoo, current names only) never can.
 INDICATIVE_STAMP = "INDICATIVE ONLY - survivorship/lookahead risk present"
+
+# Stamp for the DIY survivorship-free lane: point-in-time index membership (fja05680) + delisted
+# prices (SimFin free). Honest about its limits -- not a pristine vendor-grade "valid" run.
+SURVIVORSHIP_STAMP = (
+    "BEST-EFFORT SURVIVORSHIP-FREE - PIT index membership + delisted prices (SimFin free, >=2019); "
+    "coverage gaps possible; PIT fundamentals (EDGAR) for current names only"
+)
 
 
 def _fmt(value: float | str | None, pct: bool = False, nd: int = 2) -> str:
@@ -112,11 +119,12 @@ class BacktestResult:
     """
 
     strategy: str
-    lane: str                              # "free" | "sharadar"
-    valid: bool                            # False => indicative-only run
+    lane: str                              # "free" | "simfin" | "sharadar"
+    valid: bool                            # True only for a pristine vendor-grade survivorship-free run
     start: dt.date
     end: dt.date
     rebalance: str
+    stamp: str = INDICATIVE_STAMP          # honest validity description shown on the run
     periods_per_year: int = 12
     n_periods: int = 0                     # number of realized holding periods
     initial_capital: float = 0.0
@@ -160,7 +168,7 @@ class BacktestResult:
         return f"{self.sharpe_net:.2f}  (+/- 1 SE: {lo:.2f} to {hi:.2f})"
 
     def render(self) -> str:
-        stamp = "VALID (survivorship-free)" if self.valid else self.notes_stamp()
+        stamp = "VALID (survivorship-free)" if self.valid else self.stamp
         lines = [
             f"Backtest - strategy: {self.strategy} | {self.start} to {self.end} | "
             f"rebalanced {self.rebalance}",
@@ -203,9 +211,6 @@ class BacktestResult:
             lines += [f"  - {n}" for n in self.notes]
         if not self.valid:
             lines.append("")
-            lines.append(f"*** {INDICATIVE_STAMP} ***")
+            lines.append(f"*** {self.stamp} ***")
         body = "\n".join(lines)
         return f"{body}\n{'-' * 64}\nDISCLAIMER: {PERSISTENT_DISCLAIMER}"
-
-    def notes_stamp(self) -> str:
-        return INDICATIVE_STAMP
