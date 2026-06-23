@@ -23,7 +23,9 @@ import pandas as pd
 
 from equity_research import backtest, exposures, factors, portfolio, report, universe
 from equity_research.config import config
-from equity_research.data import edgar, fred, pit, prices_free, reference, sectors, storage
+from equity_research.data import (
+    edgar, fred, index_membership, pit, prices_free, reference, sectors, storage,
+)
 from equity_research.disclaimer import PERSISTENT_DISCLAIMER
 
 
@@ -267,6 +269,29 @@ def _construct(tickers: list[str], asof: dt.date, method: str, top: int, value: 
     print(res.render())
 
 
+def _pull_index_history(source: str | None) -> None:
+    src = source or index_membership.FJA_URL
+    print(f"Ingesting point-in-time S&P 500 membership from "
+          f"{'fja05680/sp500 (MIT)' if not source else src} ...")
+    try:
+        s = index_membership.ingest(src)
+    except Exception as exc:
+        print(f"Failed to ingest membership: {exc}")
+        return
+    print(f"Loaded {s['windows']} membership windows | {s['tickers']} distinct tickers "
+          f"| {s['current']} currently in index")
+    conn = storage.connect()
+    try:
+        for y in (2002, 2008, 2012, 2016, 2020, 2024):
+            n = len(universe.survivorship_universe(conn, dt.date(y, 6, 30)))
+            print(f"  point-in-time universe as of {y}-06-30: {n} names")
+    finally:
+        conn.close()
+    print("\nNote: this is the survivorship-free UNIVERSE only (membership facts, no prices). "
+          "Backtesting the delisted members still needs delisted PRICES, which free Yahoo lacks.")
+    print(f"\n{PERSISTENT_DISCLAIMER}")
+
+
 def _backtest(strategy: str, start: dt.date, end: dt.date, rebalance: str, lane: str,
               value: float | None, tax: float | None) -> None:
     over: dict = {}
@@ -354,6 +379,13 @@ def main(argv: list[str] | None = None) -> None:
     ps.add_argument("tickers", nargs="*",
                     help="tickers to classify; omit to backfill all loaded names")
 
+    pih = sub.add_parser(
+        "pull-index-history",
+        help="Load survivorship-free S&P 500 membership (current + delisted) for the backtest universe",
+    )
+    pih.add_argument("--source", default=None,
+                     help="CSV path or URL of the membership export (default: shared sheet)")
+
     mac = sub.add_parser("macro", help="Show macro values known as of a date (ALFRED vintage)")
     mac.add_argument("--asof", default=dt.date.today().isoformat(),
                      help="point-in-time date (YYYY-MM-DD); default today")
@@ -402,6 +434,8 @@ def main(argv: list[str] | None = None) -> None:
         _pull_macro(args.series, dt.date.fromisoformat(args.asof))
     elif args.cmd == "pull-sectors":
         _pull_sectors(args.tickers)
+    elif args.cmd == "pull-index-history":
+        _pull_index_history(args.source)
     elif args.cmd == "macro":
         _macro(dt.date.fromisoformat(args.asof))
     elif args.cmd == "exposures":

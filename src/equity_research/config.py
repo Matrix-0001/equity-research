@@ -138,6 +138,19 @@ class Config:
         default_factory=lambda: os.getenv("FRED_API_KEY") or None
     )
 
+    # Financial Modeling Prep API key (free tier at financialmodelingprep.com). Lane "fmp" =
+    # the cheap survivorship-aware Phase B source: delisted-inclusive prices + historical index
+    # membership. Read from .env (git-ignored); never hard-coded, never committed.
+    fmp_api_key: str | None = field(
+        default_factory=lambda: os.getenv("FMP_API_KEY") or None
+    )
+
+    # SimFin API key (free tier at simfin.com). Candidate free delisted-price source -- SimFin
+    # tracks delisted names by stable entity ID (no ticker recycling). Read from .env (git-ignored).
+    simfin_api_key: str | None = field(
+        default_factory=lambda: os.getenv("SIMFIN_API_KEY") or None
+    )
+
     # --- Universe ----------------------------------------------------------
     universe_floor: UniverseFloor = field(default_factory=UniverseFloor)
 
@@ -179,6 +192,22 @@ class Config:
                 "https://fredaccount.stlouisfed.org/apikeys, then add it to your .env."
             )
         return self.fred_api_key
+
+    def require_fmp_api_key(self) -> str:
+        if not self.fmp_api_key:
+            raise RuntimeError(
+                "FMP_API_KEY is not set. Register a free key at "
+                "https://site.financialmodelingprep.com/, then add it to your .env."
+            )
+        return self.fmp_api_key
+
+    def require_simfin_api_key(self) -> str:
+        if not self.simfin_api_key:
+            raise RuntimeError(
+                "SIMFIN_API_KEY is not set. Register a free key at "
+                "https://app.simfin.com/, then add it to your .env."
+            )
+        return self.simfin_api_key
 
 
 # Module-level singleton for convenience; construct your own for tests.

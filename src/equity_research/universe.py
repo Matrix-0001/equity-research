@@ -34,6 +34,30 @@ def backtest_universe(conn: duckdb.DuckDBPyConnection, as_of: dt.date) -> list[s
     return [r[0] for r in rows]
 
 
+def survivorship_universe(conn: duckdb.DuckDBPyConnection, as_of: dt.date) -> list[str]:
+    """Survivorship-free, point-in-time index membership as of `as_of` (from `index_membership`).
+
+    Exact membership: a ticker is in the universe on `as_of` if `as_of` falls within ANY of its
+    (start_date, end_date) windows (end_date NULL = still a member). Names that later left or
+    delisted are INCLUDED for the past dates when they were members -- that is the whole point.
+    Returns [] if the membership table has not been loaded (run `pull-index-history`).
+    """
+    exists = conn.execute(
+        "SELECT 1 FROM information_schema.tables WHERE table_name = 'index_membership'"
+    ).fetchone()
+    if not exists:
+        return []
+    rows = conn.execute(
+        """
+        SELECT DISTINCT ticker FROM index_membership
+        WHERE start_date <= ? AND (end_date IS NULL OR end_date >= ?)
+        ORDER BY ticker
+        """,
+        [as_of, as_of],
+    ).fetchall()
+    return [r[0] for r in rows]
+
+
 def screening_universe(
     conn: duckdb.DuckDBPyConnection,
     as_of: dt.date,
