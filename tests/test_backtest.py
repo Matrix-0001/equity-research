@@ -396,3 +396,141 @@ def test_equal_weight_strategy_skips_self_benchmark(tmp_path):
     assert res.benchmark_label == ""                     # would be a tautology -> skipped
     assert np.isnan(res.excess_cagr)
     assert "Benchmark (" not in res.render()
+
+
+# --------------------------------------------------------------------------- #
+# Phase C - Probabilistic Sharpe on a single run
+# --------------------------------------------------------------------------- #
+def test_probabilistic_sharpe_is_reported(tmp_path):
+    c, cfg = _rng_world(tmp_path)
+    try:
+        res = bt.run_backtest(c, dt.date(2024, 1, 15), dt.date(2024, 4, 30),
+                              strategy="hrp", cfg=cfg, bt=ZERO_COST)
+    finally:
+        c.close()
+    assert 0.0 <= res.prob_sharpe_positive <= 1.0        # it's a probability
+    out = res.render()
+    assert "Prob(SR>0)" in out and "PSR" in out
+
+
+# --------------------------------------------------------------------------- #
+# Phase C - multi-regime stress tagging
+# --------------------------------------------------------------------------- #
+def test_regime_stress_tags_covered_and_marks_uncovered(tmp_path):
+    # A 2007->2010 run straddles the GFC window (2007-10..2009-06) and normal months on either side;
+    # it never reaches COVID/dot-com/2022, which must read "Not estimated", not a fabricated 0.
+    c, cfg = _connect(tmp_path)
+    days = pd.bdate_range("2006-01-01", "2010-07-31")
+    storage.load_table(c, _prices("AAA", days, [100.0] * len(days)), "prices")
+    storage.load_table(c, _fundamentals(["AAA"], datekey="2006-01-02"), "fundamentals")
+    try:
+        res = bt.run_backtest(c, dt.date(2007, 6, 15), dt.date(2010, 6, 30),
+                              strategy="composite", cfg=cfg, bt=ZERO_COST)
+    finally:
+        c.close()
+    assert "GFC" in res.regime_stats
+    assert "normal" in res.regime_stats
+    assert res.regime_stats["GFC"]["n"] + res.regime_stats["normal"]["n"] == res.n_periods
+    assert "COVID crash" not in res.regime_stats         # this run can't speak to it
+    out = res.render()
+    assert "Multi-regime stress" in out
+    assert "COVID crash" in out and "Not estimated (no periods in this run's window)" in out
+
+
+# --------------------------------------------------------------------------- #
+# Phase C - locked test set (in-sample vs out-of-sample tail)
+# --------------------------------------------------------------------------- #
+def test_locked_test_split_is_reported(tmp_path):
+    # 8 month-ends from a 2024-01-15 start -> 7 realized periods. Lock at 2024-05-01 puts the three
+    # period-ends in Feb/Mar/Apr in-sample and the four from May..Aug out-of-sample.
+    c, cfg = _connect(tmp_path)
+    days = pd.bdate_range("2023-09-01", "2024-09-15")
+    storage.load_table(c, _prices("AAA", days, [100.0] * len(days)), "prices")
+    storage.load_table(c, _fundamentals(["AAA"]), "fundamentals")
+    locked = replace(ZERO_COST, locked_test_start=dt.date(2024, 5, 1))
+    try:
+        res = bt.run_backtest(c, dt.date(2024, 1, 15), dt.date(2024, 8, 31),
+                              strategy="composite", cfg=cfg, bt=locked)
+    finally:
+        c.close()
+    assert res.n_periods == 7
+    assert res.is_n == 3 and res.oos_n == 4
+    assert res.is_n + res.oos_n == res.n_periods
+    assert res.locked_test_start == dt.date(2024, 5, 1)
+    out = res.render()
+    assert "Out-of-sample discipline" in out
+    assert "In-sample" in out and "Out-of-sample" in out
+
+
+def test_no_lock_says_so(tmp_path):
+    c, cfg = _connect(tmp_path)
+    days = pd.bdate_range("2023-09-01", "2024-05-01")
+    storage.load_table(c, _prices("AAA", days, [100.0] * len(days)), "prices")
+    storage.load_table(c, _fundamentals(["AAA"]), "fundamentals")
+    try:
+        res = bt.run_backtest(c, dt.date(2024, 1, 15), dt.date(2024, 4, 30),
+                              strategy="composite", cfg=cfg, bt=ZERO_COST)
+    finally:
+        c.close()
+    assert res.locked_test_start is None
+    assert "no locked test boundary set" in res.render()
+
+
+# --------------------------------------------------------------------------- #
+# Phase C - backtest-compare (Deflated Sharpe, in-sample selection)
+# --------------------------------------------------------------------------- #
+def _compare_world(tmp_path):
+    c, cfg = _connect(tmp_path, min_return_obs=30, cov_lookback_days=400, default_top_n=10)
+    days = pd.bdate_range("2022-06-01", "2024-12-31")
+    rng = np.random.default_rng(19)
+    frames = []
+    for t in ("AA", "BB", "CC", "DD"):
+        px = 50.0 * np.cumprod(1 + rng.normal(0.0004, 0.012, len(days)))
+        frames.append(_prices(t, days, px))
+    storage.load_table(c, pd.concat(frames, ignore_index=True), "prices")
+    storage.load_table(c, _fundamentals(["AA", "BB", "CC", "DD"], datekey="2022-06-02"),
+                       "fundamentals")
+    return c, cfg
+
+
+def test_compare_selects_on_in_sample_dsr_and_scores_oos_once(tmp_path):
+    c, cfg = _compare_world(tmp_path)
+    strategies = ["hrp", "risk_parity", "inverse_variance", "equal_weight"]
+    locked = replace(ZERO_COST, locked_test_start=dt.date(2024, 6, 1))
+    try:
+        cmp = bt.compare_backtests(c, dt.date(2023, 1, 15), dt.date(2024, 12, 31),
+                                   strategies, cfg=cfg, bt=locked, lane="free")
+    finally:
+        c.close()
+    assert cmp.n_trials == 4
+    assert len(cmp.rows) == 4
+    # The winner is exactly the highest IN-SAMPLE DSR -- never an OOS-peeking choice.
+    finite = [r for r in cmp.rows if np.isfinite(r["dsr"])]
+    assert finite, "expected at least one strategy with a computable DSR"
+    assert cmp.selected == max(finite, key=lambda r: r["dsr"])["strategy"]
+    # Every row carries an OOS tail score (computed once, not used to select).
+    assert all(r["oos_n"] >= 1 for r in cmp.rows)
+    out = cmp.render()
+    assert "Deflated Sharpe Ratio" in out
+    assert "Selected by IN-SAMPLE DSR" in out
+    assert "locked out-of-sample tail" in out
+
+
+def test_compare_deflates_more_with_more_trials(tmp_path):
+    # The SAME strategy's DSR inside a 4-way race is <= its DSR run alone: multiple testing is
+    # actually penalized (a higher expected best-of-N benchmark to clear).
+    c, cfg = _compare_world(tmp_path)
+    locked = replace(ZERO_COST, locked_test_start=dt.date(2024, 6, 1))
+    try:
+        solo = bt.compare_backtests(c, dt.date(2023, 1, 15), dt.date(2024, 12, 31),
+                                    ["hrp"], cfg=cfg, bt=locked, lane="free")
+        race = bt.compare_backtests(c, dt.date(2023, 1, 15), dt.date(2024, 12, 31),
+                                    ["hrp", "risk_parity", "inverse_variance", "equal_weight"],
+                                    cfg=cfg, bt=locked, lane="free")
+    finally:
+        c.close()
+    solo_hrp = next(r["dsr"] for r in solo.rows if r["strategy"] == "hrp")
+    race_hrp = next(r["dsr"] for r in race.rows if r["strategy"] == "hrp")
+    assert np.isfinite(solo_hrp) and np.isfinite(race_hrp)
+    assert race_hrp <= solo_hrp + 1e-12                  # more trials -> equal-or-lower DSR
+    assert race.sr_variance > 0.0                        # the trials actually differed

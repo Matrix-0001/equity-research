@@ -38,7 +38,9 @@ import pandas as pd
 from equity_research import costs, factors, metrics, portfolio, universe
 from equity_research.config import BacktestConfig, Config, config
 from equity_research.data import pit
-from equity_research.disclaimer import INDICATIVE_STAMP, SURVIVORSHIP_STAMP, BacktestResult
+from equity_research.disclaimer import (
+    INDICATIVE_STAMP, SURVIVORSHIP_STAMP, BacktestCompare, BacktestResult,
+)
 
 # "equal_weight" is both a runnable strategy and the default benchmark (naive 1/N diversification).
 STRATEGIES = ("hrp", "risk_parity", "inverse_variance", "composite", "equal_weight")
@@ -159,6 +161,7 @@ class _Walk:
     nav_curve: list[tuple[dt.date, float]] = field(default_factory=list)
     net_rets: list[float] = field(default_factory=list)
     gross_rets: list[float] = field(default_factory=list)
+    period_end_dates: list[dt.date] = field(default_factory=list)  # aligned 1:1 with net_rets
     turnovers: list[float] = field(default_factory=list)
     total_txn: float = 0.0
     total_tax: float = 0.0
@@ -213,6 +216,7 @@ def _walk(
             if gross_r is not None:
                 out.gross_rets.append(gross_r)
                 out.net_rets.append(gross_r)  # no rebalance friction at the terminal mark
+                out.period_end_dates.append(d)
             nav = V
             out.nav_curve.append((d, nav))
             break
@@ -263,6 +267,7 @@ def _walk(
         if k > 0:
             out.gross_rets.append(gross_r)            # gross of this date's friction
             out.net_rets.append(nav_new / prev_nav - 1.0)
+            out.period_end_dates.append(d)
             out.turnovers.append(traded / V if V > 0 else float("nan"))
 
         # --- 7. Re-establish holdings at the post-cost NAV; keep the undeployed fraction as cash ---
@@ -289,8 +294,27 @@ def _walk(
 
 
 # --------------------------------------------------------------------------- #
-# Engine entry point
+# Phase C helpers -- higher-moment Sharpe + locked-test (in/out-of-sample) split
 # --------------------------------------------------------------------------- #
+def _window_metrics(rets: list[float], ppy: int, rf: float) -> dict:
+    """Summary stats for a slice of the return path (empty slice -> n=0 and NaNs, never faked)."""
+    sr, _ = metrics.sharpe(rets, ppy, rf)
+    return {
+        "n": len(rets),
+        "cagr": metrics.cagr(rets, ppy),
+        "vol": metrics.annualized_volatility(rets, ppy),
+        "sharpe": sr,
+        "max_drawdown": metrics.max_drawdown(rets),
+    }
+
+
+def _per_period_sharpe(annual_sharpe: float, ppy: int) -> float:
+    """The non-annualized Sharpe the PSR/DSR formulas expect (annual = per-period * sqrt(ppy))."""
+    if not np.isfinite(annual_sharpe):
+        return float("nan")
+    return annual_sharpe / np.sqrt(ppy)
+
+
 def run_backtest(
     conn: duckdb.DuckDBPyConnection,
     start: dt.date,
@@ -394,6 +418,33 @@ def run_backtest(
         else float("nan")
     )
 
+    # Phase C - Probabilistic Sharpe (P(true SR > 0)): correct the single-path Sharpe for the
+    # series' actual skew/kurtosis + sample length. A near-normal series (skew 0, kurt 3) needs no
+    # adjustment, so missing higher moments fall back to those rather than blocking the PSR.
+    skew = metrics.skewness(strat.net_rets)
+    kurt = metrics.kurtosis(strat.net_rets)
+    psr = metrics.probabilistic_sharpe_ratio(
+        _per_period_sharpe(sharpe_net, ppy), len(strat.net_rets),
+        skew if np.isfinite(skew) else 0.0, kurt if np.isfinite(kurt) else 3.0,
+    )
+
+    # Phase C - multi-regime stress: bucket each realized period by the regime of its END date.
+    regime_stats = metrics.regime_breakdown(strat.period_end_dates, strat.net_rets, ppy)
+
+    # Phase C - locked test set: split the path at the hold-out boundary and summarize each side.
+    lock = bt.locked_test_start
+    is_stats = _window_metrics([], ppy, rf)
+    oos_stats = _window_metrics([], ppy, rf)
+    if lock is not None:
+        pairs = list(zip(strat.period_end_dates, strat.net_rets, strict=True))
+        is_stats = _window_metrics([r for d, r in pairs if d < lock], ppy, rf)
+        oos_stats = _window_metrics([r for d, r in pairs if d >= lock], ppy, rf)
+        if oos_stats["n"] == 0:
+            notes.append(
+                f"locked_test_start {lock} is at/after the end of the run -> no out-of-sample tail "
+                f"to evaluate (move it earlier to hold out a meaningful period)."
+            )
+
     # Benchmark: equal-weight 1/N of the same investable universe, same costs/dates. Skipped when
     # the strategy IS the benchmark (would be a tautology).
     bench_label = ""
@@ -426,7 +477,126 @@ def run_backtest(
         vol_gross=metrics.annualized_volatility(strat.gross_rets, ppy),
         sharpe_gross=sharpe_gross,
         total_txn_cost=strat.total_txn, total_tax=strat.total_tax, cost_drag_annual=cost_drag,
+        prob_sharpe_positive=psr,
+        ret_skew=(skew if np.isfinite(skew) else float("nan")),
+        ret_kurtosis=(kurt if np.isfinite(kurt) else float("nan")),
+        regime_stats=regime_stats,
+        locked_test_start=lock,
+        is_n=is_stats["n"], is_cagr=is_stats["cagr"], is_vol=is_stats["vol"],
+        is_sharpe=is_stats["sharpe"], is_max_drawdown=is_stats["max_drawdown"],
+        oos_n=oos_stats["n"], oos_cagr=oos_stats["cagr"], oos_vol=oos_stats["vol"],
+        oos_sharpe=oos_stats["sharpe"], oos_max_drawdown=oos_stats["max_drawdown"],
         benchmark_label=bench_label, bench_cagr_net=bench_cagr, bench_vol_net=bench_vol,
         bench_sharpe_net=bench_sharpe, bench_max_drawdown=bench_mdd, excess_cagr=excess,
         cost_assumptions=assumptions, notes=notes, nav_curve=strat.nav_curve,
+        net_returns=list(strat.net_rets), period_end_dates=list(strat.period_end_dates),
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Phase C entry point -- honest multiple-strategy comparison (Deflated Sharpe)
+# --------------------------------------------------------------------------- #
+def _split_returns(
+    res: BacktestResult, lock: dt.date | None
+) -> tuple[list[float], list[float]]:
+    """(in-sample, out-of-sample) realized returns, split at the locked-test boundary.
+
+    With no lock the whole path is in-sample (and there is no held-out tail to score once).
+    """
+    pairs = list(zip(res.period_end_dates, res.net_returns, strict=True))
+    if lock is None:
+        return [r for _, r in pairs], []
+    return [r for d, r in pairs if d < lock], [r for d, r in pairs if d >= lock]
+
+
+def compare_backtests(
+    conn: duckdb.DuckDBPyConnection,
+    start: dt.date,
+    end: dt.date,
+    strategies: list[str],
+    cfg: Config = config,
+    bt: BacktestConfig | None = None,
+    lane: str = "free",
+) -> BacktestCompare:
+    """Compare N strategies honestly: Deflated-Sharpe each (n_trials=N), select IN-SAMPLE ONLY.
+
+    Runs each strategy over [start, end] (reusing `run_backtest`, so every run is net of costs and
+    point-in-time). For each, the Deflated Sharpe Ratio uses `n_trials = len(strategies)` and the
+    cross-trial variance of the in-sample per-period Sharpes as the deflation dispersion -- so a
+    strategy that merely won an N-horse race is discounted. SELECTION uses only the in-sample window
+    (before `bt.locked_test_start`); the locked out-of-sample tail is reported once for the winner
+    and never used to choose it. This is the structural multiple-testing + out-of-sample discipline
+    non-negotiable #5 demands.
+    """
+    bt = bt or cfg.backtest
+    strategies = [s.lower() for s in dict.fromkeys(strategies)]  # de-dup, preserve order
+    ppy = _FREQ.get(bt.rebalance, ("ME", 12))[1]
+    rf = bt.risk_free_annual / ppy
+    lock = bt.locked_test_start
+    n_trials = len(strategies)
+    stamp = SURVIVORSHIP_STAMP if lane == "simfin" else INDICATIVE_STAMP
+    notes: list[str] = []
+
+    # 1. Run every strategy and collect its in-sample per-period Sharpe / skew / kurtosis.
+    runs: dict[str, BacktestResult] = {}
+    is_pp_sharpes: dict[str, float] = {}
+    is_moments: dict[str, tuple[int, float, float]] = {}   # strategy -> (n_is, skew, kurt)
+    for s in strategies:
+        res = run_backtest(conn, start, end, strategy=s, cfg=cfg, bt=bt, lane=lane)
+        runs[s] = res
+        is_rets, _ = _split_returns(res, lock)
+        is_pp_sharpes[s] = _per_period_sharpe(metrics.sharpe(is_rets, ppy, rf)[0], ppy)
+        sk, ku = metrics.skewness(is_rets), metrics.kurtosis(is_rets)
+        is_moments[s] = (len(is_rets), sk if np.isfinite(sk) else 0.0,
+                         ku if np.isfinite(ku) else 3.0)
+
+    # 2. Deflation dispersion = variance of the in-sample per-period Sharpes ACROSS the trials.
+    finite_sr = [v for v in is_pp_sharpes.values() if np.isfinite(v)]
+    sr_variance = float(np.var(finite_sr, ddof=1)) if len(finite_sr) >= 2 else 0.0
+
+    # 3. Per-strategy DSR (in-sample) + display rows (in-sample selection metrics, OOS for show only).
+    rows: list[dict] = []
+    for s in strategies:
+        res = runs[s]
+        is_rets, oos_rets = _split_returns(res, lock)
+        is_w = _window_metrics(is_rets, ppy, rf)
+        oos_w = _window_metrics(oos_rets, ppy, rf)
+        n_is, sk, ku = is_moments[s]
+        dsr = (metrics.deflated_sharpe_ratio(is_pp_sharpes[s], n_is, n_trials, sk, ku,
+                                             sr_variance=sr_variance)
+               if n_is >= 2 and np.isfinite(is_pp_sharpes[s]) else float("nan"))
+        rows.append({
+            "strategy": s, "is_n": is_w["n"], "is_cagr": is_w["cagr"],
+            "is_sharpe": is_w["sharpe"], "dsr": dsr,
+            "oos_n": oos_w["n"], "oos_cagr": oos_w["cagr"], "oos_sharpe": oos_w["sharpe"],
+        })
+
+    # 4. Select the winner by IN-SAMPLE DSR only (tie-break: in-sample Sharpe). Never peek at OOS.
+    selectable = [r for r in rows if np.isfinite(r["dsr"])]
+    selected = ""
+    if selectable:
+        best = max(selectable, key=lambda r: (r["dsr"],
+                                              r["is_sharpe"] if np.isfinite(r["is_sharpe"]) else -1e9))
+        selected = best["strategy"]
+
+    if n_trials < 2:
+        notes.append("only one strategy compared -> no multiple-testing correction applies "
+                     "(DSR reduces to the probabilistic Sharpe). Pass >=2 strategies to deflate.")
+    if lock is None:
+        notes.append("no locked_test_start set -> selection used the WHOLE sample and there is no "
+                     "held-out tail. Set --locked-test-start for true out-of-sample discipline.")
+    else:
+        notes.append(f"selection used IN-SAMPLE data only (before {lock}); the out-of-sample tail "
+                     f"was scored once, after selection.")
+    notes.append(f"DSR deflation dispersion (cross-trial variance of in-sample per-period Sharpes): "
+                 f"{sr_variance:.6f}")
+    if lane == "simfin":
+        notes.append("survivorship-free lane: price-only strategies only (composite is refused).")
+    else:
+        notes.append("free lane: survivorship-biased -> the comparison is INDICATIVE ONLY.")
+
+    return BacktestCompare(
+        lane=lane, stamp=stamp, start=start, end=end, rebalance=bt.rebalance,
+        periods_per_year=ppy, locked_test_start=lock, n_trials=n_trials,
+        sr_variance=sr_variance, rows=rows, selected=selected, valid=False, notes=notes,
     )

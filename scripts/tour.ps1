@@ -12,6 +12,7 @@
 param(
     [string]$Ticker = "AAPL",
     [string]$FreeStart = "2012-01-01",      # deep Yahoo history -> a multi-regime free/indicative run
+    [string]$LockStart = "2022-01-01",      # Phase C: hold out 2022+ as the locked out-of-sample tail
     [string]$SimfinStart = "2021-07-01"     # SimFin free history starts ~2019
 )
 
@@ -51,6 +52,13 @@ Run "Macro rate/recession exposures for $Ticker (PIT OLS betas + NBER base rate)
 Section "v3 Phase A - WALK-FORWARD BACKTEST (free lane, INDICATIVE ONLY)"
 Run "HRP backtest vs equal-weight benchmark, net of costs" `
     @('backtest', '--strategy', 'hrp', '--start', $FreeStart, '--lane', 'free')
+
+Section "v3 Phase C - OUT-OF-SAMPLE DISCIPLINE + STRESS (free lane, INDICATIVE ONLY)"
+Run "HRP backtest with a locked test set (in-sample vs out-of-sample tail) + PSR + regime stress" `
+    @('backtest', '--strategy', 'hrp', '--start', $FreeStart, '--lane', 'free', '--locked-test-start', $LockStart)
+Run "Deflated-Sharpe race across strategies (multiple-testing-correct; selects IN-SAMPLE only)" `
+    @('backtest-compare', '--strategies', 'hrp', 'risk_parity', 'inverse_variance', 'equal_weight', `
+      '--start', $FreeStart, '--lane', 'free', '--locked-test-start', $LockStart)
 
 Section "v3 Phase B - SURVIVORSHIP-FREE BACKTEST (SimFin lane)"
 $simfinDir = Join-Path $repo "data_simfin"

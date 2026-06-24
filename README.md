@@ -35,9 +35,10 @@ Markets are assumed mostly efficient; durable edges are rare, narrow, and decay 
 - **v2** — Portfolio construction (diversification, risk parity / HRP, fractional Kelly with a hard
   cap; position/sector/liquidity limits).
 - **v3** — Validated backtesting + multi-regime stress tests (dot-com, GFC, COVID, 2022), reported
-  net of costs and with multiple-testing correction. **Phase A (engine + cost model on free data,
-  indicative-only) is complete;** Phase B (survivorship-free via Sharadar) and Phase C (locked test
-  set, Deflated Sharpe, regime stress) are pending. See [v3 build spec](docs/v3_backtesting.md).
+  net of costs and with multiple-testing correction. **Phases A, B, and C are complete on free data:**
+  walk-forward engine + cost model (A), best-effort survivorship-free lane (B), and out-of-sample
+  discipline — Deflated Sharpe + `backtest-compare`, multi-regime stress, locked test set (C).
+  See [v3 build spec](docs/v3_backtesting.md).
 - **v4 (gated)** — sentiment/NLP & alt-data, only if proven licensable *and* additive out-of-sample.
 
 ## What this system will NOT claim to do
@@ -51,20 +52,24 @@ Only: (a) translate computed metrics into plain-language theses / bull–bear ca
 and missing data. It never produces a numeric estimate of its own and never overrides a computed value.
 
 ## Current status
-**Phase 0 + v1 + v2 + v3 (Phase A & B) complete — all on FREE data.** v1: factor screen + valuation +
+**Phase 0 + v1 + v2 + v3 (Phase A, B & C) complete — all on FREE data.** v1: factor screen + valuation +
 accounting-quality flags + full SecurityReport (optional LLM bull/bear) + persistent universe. v2:
 portfolio construction (risk parity / HRP, fractional Kelly, position + sector + liquidity caps);
 FRED/ALFRED macro + rate/recession exposures. v3 Phase A: walk-forward backtest engine +
 transaction-cost model + net-of-cost metrics + equal-weight benchmark (free Yahoo lane = "indicative
 only"). **v3 Phase B: best-effort survivorship-free backtests for $0** — point-in-time S&P 500
 membership (fja05680, MIT) + delisted-inclusive prices (SimFin free, ~2019+); *Sharadar declined on
-cost.* Python 3.12 + `.venv`
-installed; **136/136 tests pass** (point-in-time, survivorship-free universe, EDGAR
+cost.* **v3 Phase C: out-of-sample discipline** — Probabilistic + Deflated Sharpe Ratio and a
+`backtest-compare` race (multiple-testing-correct, selects in-sample only), a multi-regime stress
+table (dot-com / GFC / COVID / 2022 / normal; unreached regimes read "Not estimated"), and locked-test
+enforcement (in-sample vs out-of-sample tail). Python 3.12 + `.venv`
+installed; **159/159 tests pass** (point-in-time, survivorship-free universe, EDGAR
 flow-duration logic, factor math, flags, valuation, upsert persistence, report assembly, LLM parsing,
 v2 portfolio weighting / position+sector+liquidity caps / Kelly, vintage-aware FRED/ALFRED macro,
 macro exposure regressions, SIC->sector mapping, v3 cost model / metrics / walk-forward engine
 incl. no-lookahead, cost accounting, NAV compounding, delisting, cash conservation, benchmark, the
-SimFin price parser, PIT index membership, and a survivorship-lane test that a delisted crash is felt).
+SimFin price parser, PIT index membership, a survivorship-lane test that a delisted crash is felt,
+and Phase C's Deflated Sharpe / PSR / normal-CDF / regime tagging / locked-test split / compare race).
 Stack: Python + DuckDB/Parquet.
 
 **Data sources (free, no subscription):**
@@ -84,13 +89,14 @@ the storage / point-in-time / universe / factor layers don't change.
 
 ### Quickstart
 ```
-.venv\Scripts\python -m pytest -q                                     # 87/87
+.venv\Scripts\python -m pytest -q                                     # 159/159
 .venv\Scripts\python -m equity_research.cli pull-sp500 --limit 50     # seed the universe (accumulates)
 .venv\Scripts\python -m equity_research.cli universe                  # what's loaded
 .venv\Scripts\python -m equity_research.cli screen                    # factor ranks, whole universe
 .venv\Scripts\python -m equity_research.cli report AAPL               # full SecurityReport
 .venv\Scripts\python -m equity_research.cli construct --method hrp    # risk-based weights + caps (v2)
-.venv\Scripts\python -m equity_research.cli backtest --strategy hrp --start 2024-07-01  # walk-forward, net of costs (v3 Phase A; INDICATIVE ONLY)
+.venv\Scripts\python -m equity_research.cli backtest --strategy hrp --start 2012-01-01 --locked-test-start 2022-01-01   # walk-forward, net of costs, in-sample vs locked tail (v3 Phase A+C; INDICATIVE ONLY)
+.venv\Scripts\python -m equity_research.cli backtest-compare --strategies hrp risk_parity equal_weight --start 2012-01-01 --locked-test-start 2022-01-01  # Deflated-Sharpe race, in-sample selection (v3 Phase C)
 ```
 (Run from the repo root so data lands in `.\data`, which is git-ignored. `pull TICKERS...` and
 `pull-sp500` both ACCUMULATE — re-pulling refreshes a name, others stay.)
@@ -172,7 +178,24 @@ names were in the index over time, incl. delisted) and delisted prices. Both are
 *Sharadar was evaluated and declined* -- too costly for a personal project; the free fja05680 + SimFin
 combination covers the survivorship requirement for recent years.
 
+### What works today (v3 Phase C, complete -- out-of-sample discipline + stress)
+Phase C is pure analytics over the existing engine (no new data), enforcing non-negotiable #5:
+- **Probabilistic & Deflated Sharpe Ratio** (`metrics.py`, Bailey & Lopez de Prado). The PSR corrects
+  a single-path Sharpe for sample length + return skew/kurtosis; the DSR additionally **deflates for
+  multiple testing** -- it discounts a Sharpe that is merely the best of N tries. Every backtest now
+  reports `Prob(SR>0)`; the math is self-contained (a normal CDF via `erf` + an Acklam inverse-CDF, no
+  scipy) and unit-tested against the published formula.
+- **`backtest-compare --strategies ... [--locked-test-start D]`** races N strategies and reports each
+  one's DSR with `n_trials = N`, so we don't crown the luckiest of five. **Selection uses only the
+  in-sample window**; the locked out-of-sample tail is scored once, for the winner, and never used to
+  pick it.
+- **Multi-regime stress table** on every run: net return / vol / max-drawdown bucketed by market
+  regime (dot-com 2000-2002, GFC 2007-2009, COVID 2020, 2022 drawdown, else normal). A run only speaks
+  to regimes its window + lane actually reach -- the rest read **"Not estimated"** (so a `simfin` run
+  honestly shows dot-com/GFC as "Not estimated").
+- **Locked test set** (`--locked-test-start`): every run splits its realized path into in-sample and
+  the locked out-of-sample tail and reports each separately, so a single hero number can't span both
+  selection and evaluation.
+
 ### Not built yet
-- **v3 Phase C (out-of-sample discipline + stress):** locked test set + walk-forward enforcement,
-  Deflated Sharpe (multiple-testing correction), and the multi-regime stress table.
 - Smaller polish: portfolio-level macro exposures, multi-factor joint regression, true PIT GICS sectors.

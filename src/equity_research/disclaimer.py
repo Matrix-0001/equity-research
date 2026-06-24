@@ -140,6 +140,11 @@ class BacktestResult:
     max_drawdown: float = float("nan")
     hit_rate: float = float("nan")
     avg_turnover: float = float("nan")
+    # Phase C - probabilistic Sharpe (P(true SR > 0), corrected for sample length + non-normality)
+    # and the return distribution's higher moments that drive it.
+    prob_sharpe_positive: float = float("nan")
+    ret_skew: float = float("nan")
+    ret_kurtosis: float = float("nan")
     # Gross (pre-cost) comparison.
     cagr_gross: float = float("nan")
     vol_gross: float = float("nan")
@@ -156,10 +161,30 @@ class BacktestResult:
     bench_sharpe_net: float = float("nan")
     bench_max_drawdown: float = float("nan")
     excess_cagr: float = float("nan")       # strategy net CAGR - benchmark net CAGR
-    # Provenance.
+    # Phase C - multi-regime stress: {regime_label: {n, total_return, ann_vol, max_drawdown}} for
+    # the regimes this run's window/lane actually reached. Crisis regimes it never reaches are
+    # absent here and render as "Not estimated" (never fabricated coverage).
+    regime_stats: dict[str, dict] = field(default_factory=dict)
+    # Phase C - locked test set (out-of-sample discipline). If a lock boundary is set, the realized
+    # return path is split into in-sample (before) and the locked out-of-sample tail (on/after), and
+    # each is summarized separately so a single hero number can't span selection + evaluation.
+    locked_test_start: dt.date | None = None
+    is_n: int = 0
+    is_cagr: float = float("nan")
+    is_vol: float = float("nan")
+    is_sharpe: float = float("nan")
+    is_max_drawdown: float = float("nan")
+    oos_n: int = 0
+    oos_cagr: float = float("nan")
+    oos_vol: float = float("nan")
+    oos_sharpe: float = float("nan")
+    oos_max_drawdown: float = float("nan")
+    # Provenance + programmatic (not printed): the realized net path, for compare / regime / lock.
     cost_assumptions: list[str] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
     nav_curve: list[tuple[dt.date, float]] = field(default_factory=list)
+    net_returns: list[float] = field(default_factory=list)
+    period_end_dates: list[dt.date] = field(default_factory=list)
 
     def _sharpe_range(self) -> str:
         if math.isnan(self.sharpe_net):
@@ -168,6 +193,44 @@ class BacktestResult:
             return f"{self.sharpe_net:.2f}"
         lo, hi = self.sharpe_net - self.sharpe_se, self.sharpe_net + self.sharpe_se
         return f"{self.sharpe_net:.2f}  (+/- 1 SE: {lo:.2f} to {hi:.2f})"
+
+    def _regime_lines(self) -> list[str]:
+        """Per-regime stress breakdown; crisis regimes the run can't reach read 'Not estimated'."""
+        from equity_research import metrics  # local import: single source of truth for the labels
+
+        lines = ["", "Multi-regime stress (net return / vol / max drawdown by market regime):"]
+        for label in (*metrics.CRISIS_REGIMES, metrics.NORMAL_REGIME):
+            d = self.regime_stats.get(label)
+            if d and d.get("n", 0) > 0:
+                lines.append(
+                    f"  {label:<16} ret {_fmt(d['total_return'], pct=True):>9}  "
+                    f"vol {_fmt(d['ann_vol'], pct=True):>9}  "
+                    f"maxDD {_fmt(d['max_drawdown'], pct=True):>9}  (n={d['n']})"
+                )
+            else:
+                lines.append(f"  {label:<16} {NOT_ESTIMATED} (no periods in this run's window)")
+        lines.append("  (Regime windows: dot-com 2000-2002, GFC 2007-2009, COVID 2020, 2022 "
+                     "drawdown; else normal.)")
+        return lines
+
+    def _locked_test_lines(self) -> list[str]:
+        """In-sample vs out-of-sample (locked-tail) split -- the structural OOS-discipline report."""
+        if self.locked_test_start is None:
+            return ["", "Out-of-sample discipline: no locked test boundary set for this run "
+                        "(pass --locked-test-start to hold out a tail; selection must never peek)."]
+        lines = [
+            "",
+            f"Out-of-sample discipline (locked test set starts {self.locked_test_start}):",
+            f"  {'Window':<16}{'n':>4}{'CAGR':>12}{'vol':>12}{'Sharpe':>10}{'maxDD':>12}",
+            f"  {'In-sample':<16}{self.is_n:>4}{_fmt(self.is_cagr, pct=True):>12}"
+            f"{_fmt(self.is_vol, pct=True):>12}{_fmt(self.is_sharpe):>10}"
+            f"{_fmt(self.is_max_drawdown, pct=True):>12}",
+            f"  {'Out-of-sample':<16}{self.oos_n:>4}{_fmt(self.oos_cagr, pct=True):>12}"
+            f"{_fmt(self.oos_vol, pct=True):>12}{_fmt(self.oos_sharpe):>10}"
+            f"{_fmt(self.oos_max_drawdown, pct=True):>12}",
+            "  The locked tail is evaluated ONCE; no strategy/parameter selection may use it.",
+        ]
+        return lines
 
     def render(self) -> str:
         stamp = "VALID (survivorship-free)" if self.valid else self.stamp
@@ -191,11 +254,16 @@ class BacktestResult:
             f"{'Max drawdown':<22}{_fmt(self.max_drawdown, pct=True):>22}{'':>20}",
             f"{'Hit rate':<22}{_fmt(self.hit_rate, pct=True):>22}{'':>20}",
             f"{'Avg turnover/rebal':<22}{_fmt(self.avg_turnover, pct=True):>22}{'':>20}",
+            f"{'Prob(SR>0) [PSR]':<22}{_fmt(self.prob_sharpe_positive, pct=True):>22}{'':>20}",
             "",
+            f"PSR = P(true Sharpe > 0), corrected for sample length + return skew "
+            f"({_fmt(self.ret_skew)}) / kurtosis ({_fmt(self.ret_kurtosis)}).",
             f"Costs charged (ALWAYS included): transaction ${self.total_txn_cost:,.0f} + "
             f"tax ${self.total_tax:,.0f}",
             f"Annualized cost drag (gross CAGR - net CAGR): {_fmt(self.cost_drag_annual, pct=True)}",
         ]
+        lines += self._regime_lines()
+        lines += self._locked_test_lines()
         if self.benchmark_label:
             lines.append("")
             lines.append(f"Benchmark ({self.benchmark_label}):")
@@ -210,6 +278,74 @@ class BacktestResult:
             lines.append("")
             lines.append("Cost assumptions (modelled, not observed fills):")
             lines += [f"  - {a}" for a in self.cost_assumptions]
+        if self.notes:
+            lines.append("")
+            lines.append("Notes:")
+            lines += [f"  - {n}" for n in self.notes]
+        if not self.valid:
+            lines.append("")
+            lines.append(f"*** {self.stamp} ***")
+        body = "\n".join(lines)
+        return f"{body}\n{'-' * 64}\nDISCLAIMER: {PERSISTENT_DISCLAIMER}"
+
+
+@dataclass
+class BacktestCompare:
+    """Honest multiple-strategy comparison (Phase C) -- the antidote to crowning the luckiest run.
+
+    Runs N strategies over the same window and reports each one's Deflated Sharpe Ratio with
+    `n_trials = N`, so a strategy that merely won a five-horse race is discounted, not celebrated.
+    Selection uses ONLY the in-sample window (everything before `locked_test_start`); the locked
+    out-of-sample tail is scored ONCE, for the selected strategy alone -- never used to pick it.
+    Every row is net of costs and carries the run's lane/validity stamp.
+    """
+
+    lane: str
+    stamp: str
+    start: dt.date
+    end: dt.date
+    rebalance: str
+    periods_per_year: int
+    locked_test_start: dt.date | None
+    n_trials: int
+    sr_variance: float                      # cross-trial variance of the in-sample per-period Sharpes
+    rows: list[dict] = field(default_factory=list)   # per strategy (see compare_backtests)
+    selected: str = ""
+    valid: bool = False
+    notes: list[str] = field(default_factory=list)
+
+    def render(self) -> str:
+        stamp = "VALID (survivorship-free)" if self.valid else self.stamp
+        lines = [
+            f"Backtest comparison - {self.n_trials} strategies | {self.start} to {self.end} | "
+            f"rebalanced {self.rebalance}",
+            f"Data lane: {self.lane}   Validity: {stamp}",
+            f"Deflated Sharpe Ratio (DSR) corrects each strategy's Sharpe for MULTIPLE TESTING "
+            f"(n_trials={self.n_trials}),",
+            "non-normality, and sample length: DSR = P(true SR > the expected best-of-N SR).",
+            "",
+            f"  {'Strategy':<18}{'IS n':>5}{'IS CAGR':>11}{'IS Sharpe':>11}"
+            f"{'DSR':>9}{'OOS n':>7}{'OOS CAGR':>11}",
+        ]
+        for r in self.rows:
+            mark = "*" if r["strategy"] == self.selected else " "
+            lines.append(
+                f"{mark} {r['strategy']:<18}{r['is_n']:>5}"
+                f"{_fmt(r['is_cagr'], pct=True):>11}{_fmt(r['is_sharpe']):>11}"
+                f"{_fmt(r['dsr'], pct=True):>9}{r['oos_n']:>7}{_fmt(r['oos_cagr'], pct=True):>11}"
+            )
+        lines.append("")
+        if self.selected:
+            lines.append(f"Selected by IN-SAMPLE DSR (highest): {self.selected}  (marked * above)")
+            sel = next((r for r in self.rows if r["strategy"] == self.selected), None)
+            if sel is not None and self.locked_test_start is not None:
+                lines.append(
+                    f"Its locked out-of-sample tail (from {self.locked_test_start}, scored ONCE): "
+                    f"CAGR {_fmt(sel['oos_cagr'], pct=True)} | Sharpe {_fmt(sel['oos_sharpe'])} | "
+                    f"n={sel['oos_n']}"
+                )
+        else:
+            lines.append("No strategy was selectable (insufficient in-sample data on every run).")
         if self.notes:
             lines.append("")
             lines.append("Notes:")

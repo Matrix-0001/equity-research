@@ -1,6 +1,6 @@
 # v3 — Validated Backtesting & Multi-Regime Stress (build spec)
 
-**Status:** Not started · **Prereq:** v1 + v2 complete on `main` (pushed to GitHub) · 87/87 tests green.
+**Status:** Phase A + B + C COMPLETE (all on free data) · pushed to GitHub `main`.
 **Owner:** Darrell. **This is decision-support, not advice.**
 
 > Read first: `CLAUDE.md` (non-negotiables, architecture), `README.md`, and
@@ -92,8 +92,10 @@ authorize Sharadar and flip the lane for Phase B. Ask Darrell to confirm the spe
       engine. *(Decided 2026-06-22 — see decision log below.)*
 - [x] **Phase B lane: FREE DIY (not Sharadar).** Sharadar declined on cost; Phase B built on
       `fja05680` PIT membership (MIT) + SimFin free delisted prices. *(Decided 2026-06-23 — below.)*
+- [x] **Phase C: out-of-sample discipline + stress, built on the free lanes.** Deflated Sharpe +
+      `backtest-compare`, multi-regime stress table, locked-test enforcement. *(Done 2026-06-24 — §8.)*
 
-Both gates resolved. Phase B is built on the free DIY lane; Phase C remains.
+All gates resolved. Phases A, B, and C are complete on free data.
 
 ### Decision log
 
@@ -137,34 +139,52 @@ revisit Phase 0 §7.1 (confirm SF1/SEP price + non-professional license at signu
 
 ---
 
-## 8. Phase C — out-of-sample discipline + stress (how to proceed, NEXT SESSION)
+## 8. Phase C — out-of-sample discipline + stress (COMPLETE 2026-06-24)
 
-Phase A (engine, free/indicative) and Phase B (free survivorship-free lane: fja05680 PIT membership +
-SimFin free delisted prices) are **COMPLETE**. Phase C adds the out-of-sample discipline that
-non-negotiable #5 demands. Build in this order, test each (synthetic fixtures, hand-computed):
+Phase A (engine, free/indicative), Phase B (free survivorship-free lane: fja05680 PIT membership +
+SimFin free delisted prices), and **Phase C (out-of-sample discipline + multi-regime stress) are all
+COMPLETE**. Each piece has hand-computed synthetic-fixture tests. What was built:
 
 1. **Deflated Sharpe Ratio (DSR)** in `metrics.py` (Bailey & Lopez de Prado). Pure
-   `deflated_sharpe_ratio(observed_sr, n_obs, n_trials, skew, kurtosis)` that corrects the Sharpe for
-   multiple testing + non-normality + sample length, returning a probability the true SR > 0. Hand-check
-   against the published formula for a known (SR, n, trials, skew, kurt). Then a `backtest-compare`
-   flow: run the N strategies, report each one's DSR with `n_trials = N` (the honest multiple-testing
-   correction) so we don't crown a winner that's just the luckiest of five.
-2. **Multi-regime stress table.** `metrics.regime_of(date)` -> {dot-com 2000-02, GFC 2007-09,
-   COVID 2020, 2022 drawdown, else normal}; add a per-regime return / vol / max-drawdown breakdown to
-   `BacktestResult` + `render()`. IMPORTANT honesty note on data depth: the deep-Yahoo `free` lane
-   reaches GFC/dot-com but is survivorship-biased; the `simfin` survivorship lane only covers ~2019+
-   (COVID + 2022). State which regimes a given run can actually speak to; "Not estimated" for the rest.
-3. **Locked test set.** `BacktestConfig.locked_test_start` already exists -- enforce it: report
-   in-sample vs out-of-sample (locked-tail) performance separately, and make any strategy/parameter
-   SELECTION use only the in-sample period (the locked tail is evaluated once, at the very end). Refuse
-   to let selection peek at the locked period.
+   `deflated_sharpe_ratio(observed_sr, n_obs, n_trials, skew, kurt, sr_variance=None)` built from
+   `probabilistic_sharpe_ratio` (PSR, corrects for sample length + non-normality) deflated by
+   `expected_max_sharpe(n_trials, sr_variance)` (the expected best-of-N Sharpe under the null). The
+   5-argument form falls back to the null sampling variance `1/(n_obs-1)`; the compare flow passes the
+   real cross-trial variance. Self-contained normal CDF (`erf`) + inverse CDF (Acklam + one Halley
+   step) -- the venv has no scipy. **`backtest.compare_backtests(...)`** + CLI **`backtest-compare`**
+   races N strategies, reports each one's DSR with `n_trials = N`, and selects on IN-SAMPLE DSR only.
+   Every single run now also reports its PSR (`Prob(SR>0)`) with the return skew/kurtosis it used.
+2. **Multi-regime stress table.** `metrics.regime_of(date)` -> {dot-com 2000-2002, GFC 2007-2009,
+   COVID 2020, 2022 drawdown, else normal}; `metrics.regime_breakdown` buckets each realized period by
+   the regime of its end date; `BacktestResult.regime_stats` + `render()` show per-regime return / vol /
+   max-drawdown. Regimes a run's window/lane never reaches read **"Not estimated"** (never a fabricated
+   0). So a `simfin` run (>=2019) honestly shows dot-com/GFC as "Not estimated"; a deep `free` run can
+   reach them but stays survivorship-biased/indicative.
+3. **Locked test set.** `BacktestConfig.locked_test_start` is now enforced: every run splits its realized
+   path into in-sample (before the lock) and the locked out-of-sample tail (on/after), reported
+   separately. In `compare_backtests`, SELECTION uses only the in-sample window; the locked tail is
+   scored ONCE for the winner and never used to pick it. `--locked-test-start` is on both `backtest`
+   and `backtest-compare`.
 
 Posture unchanged: ranges + confidence tiers, costs always in, stamp the lane/validity, "Not estimated"
-where unfillable. Keep CLI/print output ASCII (Windows cp1252). Commit only when Darrell asks (or he
-runs `scripts\checkpoint.ps1 "msg"`, which runs the suite then commits + pushes).
+where unfillable. CLI/print output is ASCII (Windows cp1252).
 
 Optional follow-ons after Phase C: portfolio-level macro exposures; multi-factor joint regression;
 true point-in-time GICS sectors; incremental writes in `data/simfin.py` for very large pulls.
+
+### Phase C decision log
+
+**2026-06-24 - Phase C built on the free lanes (no new data).** Phase C is pure analytics over the
+existing engine output, so it needed no new data source. Choices made for honesty:
+- **DSR `n_trials` = number of strategies actually raced** (the honest count of things tried). The
+  deflation dispersion is the cross-trial variance of the in-sample per-period Sharpes; when only one
+  strategy is compared, DSR reduces to the PSR (no multiple-testing claim) and the run says so.
+- **Per-period vs annualized Sharpe:** PSR/DSR use the per-period Sharpe (`annual / sqrt(ppy)`); the
+  rendered tables still show the familiar annualized Sharpe. Both are stated.
+- **Regime windows are approximate but fixed** (documented in `metrics.REGIME_WINDOWS`); a period is
+  tagged by its END date. Unreached regimes are "Not estimated", consistent with non-negotiable #1.
+- **No scipy dependency added** -- the normal CDF/inverse-CDF are implemented and unit-tested against
+  known quantiles, keeping the install foot-print unchanged.
 
 ---
 
@@ -176,8 +196,8 @@ true point-in-time GICS sectors; incremental writes in `data/simfin.py` for very
 > FIRST read: `CLAUDE.md`, `README.md`, `docs/phase0_data_inventory.md`, and `docs/v3_backtesting.md`
 > (the v3 build spec — especially **§8 "Phase C — how to proceed"**).
 >
-> State of play: **v1 + v2 + v3 Phase A & B are COMPLETE, committed and pushed** to GitHub
-> `Matrix-0001/equity-research` (`main`); **136/136 tests pass** (`.venv\Scripts\python -m pytest -q`).
+> State of play: **v1 + v2 + v3 Phase A, B & C are COMPLETE** (Phase C committed when you ask) on GitHub
+> `Matrix-0001/equity-research` (`main`); **159/159 tests pass** (`.venv\Scripts\python -m pytest -q`).
 > ALL data is FREE: EDGAR fundamentals + Yahoo prices (deep daily) + FRED/ALFRED macro; and for
 > survivorship-free backtests, **fja05680 point-in-time S&P 500 membership (MIT) + SimFin free delisted
 > prices (~2019+)**. Keys `FRED_API_KEY`, `FMP_API_KEY`, `SIMFIN_API_KEY` are in the local `.env`
@@ -187,13 +207,14 @@ true point-in-time GICS sectors; incremental writes in `data/simfin.py` for very
 > (PIT membership + delisted prices = best-effort survivorship-free; price-only strategies hrp /
 > risk_parity / inverse_variance / equal_weight; composite refused). For the simfin lane use a dedicated
 > data dir: `setx`/`$env:EQR_DATA_DIR="./data_simfin"`, then `pull-index-history` then `pull-simfin`,
-> then `backtest --lane simfin`.
+> then `backtest --lane simfin`. Phase C adds `backtest-compare` (Deflated-Sharpe race) and
+> `--locked-test-start` (in-sample vs out-of-sample tail) on both `backtest` and `backtest-compare`.
 >
 > Non-negotiables: no fabricated numbers ("Not estimated"); point-in-time or nothing; costs always
 > included; uncertainty as ranges + Low/Med/High confidence; out-of-sample discipline (locked test set,
 > walk-forward, Deflated Sharpe); stamp the lane/validity on every run.
 >
-> Today: **build v3 Phase C** per `docs/v3_backtesting.md` §8 — (1) Deflated Sharpe Ratio + a
-> `backtest-compare` flow, (2) multi-regime stress table, (3) locked-test-set enforcement — each with
-> hand-computed tests. Working norms: tests for every analytical piece; ASCII CLI output (Windows
-> cp1252); commit only when I ask (or via `scripts\checkpoint.ps1 "msg"`).
+> v3 is COMPLETE (Phases A, B, C). Optional follow-ons (see §8 end): portfolio-level macro exposures;
+> multi-factor joint regression; true point-in-time GICS sectors; incremental writes in `data/simfin.py`.
+> Working norms: tests for every analytical piece; ASCII CLI output (Windows cp1252); commit only when I
+> ask (or via `scripts\checkpoint.ps1 "msg"`).

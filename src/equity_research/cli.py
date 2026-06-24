@@ -334,8 +334,9 @@ def _pull_simfin(tickers: list[str], start: str) -> None:
     print(f"\n{PERSISTENT_DISCLAIMER}")
 
 
-def _backtest(strategy: str, start: dt.date, end: dt.date, rebalance: str, lane: str,
-              value: float | None, tax: float | None) -> None:
+def _bt_config(rebalance: str, value: float | None, tax: float | None,
+               locked_test_start: dt.date | None):
+    """Build a BacktestConfig from CLI overrides (None keeps the configured default)."""
     over: dict = {}
     if rebalance:
         over["rebalance"] = rebalance
@@ -343,7 +344,14 @@ def _backtest(strategy: str, start: dt.date, end: dt.date, rebalance: str, lane:
         over["initial_capital_usd"] = value
     if tax is not None:
         over["tax_rate"] = tax
-    btcfg = replace(config.backtest, **over) if over else config.backtest
+    if locked_test_start is not None:
+        over["locked_test_start"] = locked_test_start
+    return replace(config.backtest, **over) if over else config.backtest
+
+
+def _backtest(strategy: str, start: dt.date, end: dt.date, rebalance: str, lane: str,
+              value: float | None, tax: float | None, locked: dt.date | None) -> None:
+    btcfg = _bt_config(rebalance, value, tax, locked)
     conn = storage.connect()
     try:
         res = backtest.run_backtest(conn, start, end, strategy=strategy, cfg=config,
@@ -351,6 +359,19 @@ def _backtest(strategy: str, start: dt.date, end: dt.date, rebalance: str, lane:
     finally:
         conn.close()
     print(res.render())
+
+
+def _backtest_compare(strategies: list[str], start: dt.date, end: dt.date, rebalance: str,
+                      lane: str, value: float | None, tax: float | None,
+                      locked: dt.date | None) -> None:
+    btcfg = _bt_config(rebalance, value, tax, locked)
+    conn = storage.connect()
+    try:
+        cmp = backtest.compare_backtests(conn, start, end, strategies, cfg=config,
+                                         bt=btcfg, lane=lane)
+    finally:
+        conn.close()
+    print(cmp.render())
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -465,6 +486,31 @@ def main(argv: list[str] | None = None) -> None:
     bt.add_argument("--tax", type=float, default=None,
                     help=f"tax rate on realized gains per rebalance "
                          f"(default {config.backtest.tax_rate}; 0 = tax-deferred)")
+    bt.add_argument("--locked-test-start", default=None,
+                    help="hold-out boundary (YYYY-MM-DD): report in-sample vs out-of-sample "
+                         "(locked-tail) performance separately (Phase C out-of-sample discipline)")
+
+    btc = sub.add_parser(
+        "backtest-compare",
+        help="Compare strategies with the Deflated Sharpe Ratio (Phase C; multiple-testing-correct)",
+    )
+    btc.add_argument("--strategies", nargs="+", default=list(backtest.STRATEGIES),
+                     choices=list(backtest.STRATEGIES),
+                     help="strategies to race (DSR uses n_trials = how many you pass)")
+    btc.add_argument("--start", required=True, help="backtest start date (YYYY-MM-DD)")
+    btc.add_argument("--end", default=dt.date.today().isoformat(),
+                     help="backtest end date (YYYY-MM-DD); default today")
+    btc.add_argument("--rebalance", default=config.backtest.rebalance,
+                     choices=["monthly", "quarterly"], help="rebalance cadence")
+    btc.add_argument("--lane", default="free", choices=["free", "simfin", "sharadar"],
+                     help="'free' = indicative; 'simfin' = best-effort survivorship-free")
+    btc.add_argument("--value", type=float, default=None,
+                     help=f"initial capital (default {config.backtest.initial_capital_usd:,.0f})")
+    btc.add_argument("--tax", type=float, default=None,
+                     help=f"tax rate on realized gains per rebalance (default {config.backtest.tax_rate})")
+    btc.add_argument("--locked-test-start", default=None,
+                     help="hold-out boundary (YYYY-MM-DD): SELECTION uses only data before it; the "
+                          "locked tail is scored once for the winner. Strongly recommended for compare.")
 
     args = ap.parse_args(argv)
     if args.cmd == "pull":
@@ -497,7 +543,14 @@ def main(argv: list[str] | None = None) -> None:
     elif args.cmd == "backtest":
         _backtest(args.strategy, dt.date.fromisoformat(args.start),
                   dt.date.fromisoformat(args.end), args.rebalance, args.lane,
-                  args.value, args.tax)
+                  args.value, args.tax,
+                  dt.date.fromisoformat(args.locked_test_start) if args.locked_test_start else None)
+    elif args.cmd == "backtest-compare":
+        _backtest_compare(args.strategies, dt.date.fromisoformat(args.start),
+                          dt.date.fromisoformat(args.end), args.rebalance, args.lane,
+                          args.value, args.tax,
+                          dt.date.fromisoformat(args.locked_test_start)
+                          if args.locked_test_start else None)
 
 
 if __name__ == "__main__":
