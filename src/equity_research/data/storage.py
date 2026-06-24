@@ -38,11 +38,12 @@ def connect(cfg: Config = config) -> duckdb.DuckDBPyConnection:
 
 
 def snapshot_path(
-    table_name: str, snapshot_date: dt.date, vendor: str, cfg: Config = config
+    table_name: str, snapshot_date: dt.date, vendor: str, cfg: Config = config,
+    suffix: str = "",
 ) -> Path:
     d = cfg.raw_dir / vendor / table_name / snapshot_date.isoformat()
     d.mkdir(parents=True, exist_ok=True)
-    return d / f"{table_name}.parquet"
+    return d / f"{table_name}{suffix}.parquet"
 
 
 def write_snapshot(
@@ -53,10 +54,15 @@ def write_snapshot(
     vendor: str,
     snapshot_date: dt.date | None = None,
     cfg: Config = config,
+    suffix: str = "",
 ) -> Path:
-    """Persist a raw pull to immutable parquet and register it. Returns the path."""
+    """Persist a raw pull to immutable parquet and register it. Returns the path.
+
+    `suffix` lets a large resumable pull write one parquet per batch (e.g. "_b03") so batches do
+    not overwrite each other, keeping memory bounded (a batch is snapshotted then freed).
+    """
     snapshot_date = snapshot_date or dt.date.today()
-    path = snapshot_path(table_name, snapshot_date, vendor, cfg)
+    path = snapshot_path(table_name, snapshot_date, vendor, cfg, suffix=suffix)
     df.to_parquet(path, index=False)
     conn.execute(
         f"INSERT INTO {_SNAPSHOT_REGISTRY} VALUES (?, ?, ?, ?, ?, ?)",

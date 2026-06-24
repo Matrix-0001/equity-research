@@ -85,38 +85,66 @@ def ingest(
     cfg: Config = config,
     snapshot_date: dt.date | None = None,
     years: float | None = _DEFAULT_YEARS,
+    skip_existing: bool = False,
+    batch_size: int = 50,
 ) -> dict:
     """Fetch + load daily prices for `tickers` into the `prices` table.
 
-    `years` bounds the history depth (None = full daily history); deep by default for backtesting.
+    `years` bounds the history depth (None = full daily history; deep by default for backtesting).
+    RESUMABLE for large universes (S&P 1500): with `skip_existing`, tickers already in the `prices`
+    table are skipped, and progress is persisted every `batch_size` names (per-batch snapshot +
+    upsert, then the batch is freed to bound memory -- deep daily history for 1500 names is large).
+    A single failing fetch is recorded (no_data) rather than aborting the pull.
     """
     snapshot_date = snapshot_date or dt.date.today()
-
-    frames: list[pd.DataFrame] = []
-    resolved: list[str] = []
-    no_data: list[str] = []
-    for t in tickers:
-        df = fetch_prices(t, cfg, years=years)
-        if df.empty:
-            no_data.append(t)
-        else:
-            frames.append(df)
-            resolved.append(t.upper())
-        time.sleep(_REQUEST_DELAY_S)
-
-    summary = {"rows": 0, "tickers_resolved": resolved, "tickers_no_data": no_data}
-    if not frames:
-        return summary
-
-    prices = pd.concat(frames, ignore_index=True)
     conn = storage.connect(cfg)
     try:
-        storage.write_snapshot(
-            conn, prices, "prices", source="Yahoo Finance chart",
-            vendor="yahoo", snapshot_date=snapshot_date, cfg=cfg,
-        )
-        storage.upsert_by_ticker(conn, prices, "prices")
+        already: set[str] = set()
+        if skip_existing and storage.table_exists(conn, "prices"):
+            already = {r[0] for r in
+                       conn.execute("SELECT DISTINCT ticker FROM prices").fetchall()}
+        todo = [t for t in tickers if t.upper() not in already]
+        skipped = len(tickers) - len(todo)
+
+        resolved: list[str] = []
+        no_data: list[str] = []
+        frames: list[pd.DataFrame] = []
+        rows = 0
+        batch_no = 0
+
+        def _flush() -> None:
+            nonlocal frames, rows, batch_no
+            if not frames:
+                return
+            batch = pd.concat(frames, ignore_index=True)
+            storage.write_snapshot(
+                conn, batch, "prices", source="Yahoo Finance chart", vendor="yahoo",
+                snapshot_date=snapshot_date, cfg=cfg, suffix=f"_b{batch_no:03d}",
+            )
+            storage.upsert_by_ticker(conn, batch, "prices")
+            rows += len(batch)
+            batch_no += 1
+            frames = []
+
+        for i, t in enumerate(todo, start=1):
+            try:
+                df = fetch_prices(t, cfg, years=years)
+            except Exception:
+                no_data.append(t.upper())
+                time.sleep(_REQUEST_DELAY_S)
+                continue
+            if df.empty:
+                no_data.append(t.upper())
+            else:
+                frames.append(df)
+                resolved.append(t.upper())
+            time.sleep(_REQUEST_DELAY_S)
+            if i % batch_size == 0:
+                _flush()
+                print(f"  ... prices {i}/{len(todo)} ({len(resolved)} resolved) - progress saved",
+                      flush=True)
+        _flush()
+        return {"rows": rows, "tickers_resolved": resolved, "tickers_no_data": no_data,
+                "skipped": skipped}
     finally:
         conn.close()
-    summary["rows"] = len(prices)
-    return summary

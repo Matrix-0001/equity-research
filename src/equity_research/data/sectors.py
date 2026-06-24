@@ -82,15 +82,27 @@ def fetch_sic(cik: int, cfg: Config = config) -> tuple[int | None, str]:
 
 
 def ingest_sectors(
-    tickers: list[str], cfg: Config = config, snapshot_date: dt.date | None = None
+    tickers: list[str], cfg: Config = config, snapshot_date: dt.date | None = None,
+    skip_existing: bool = False,
 ) -> dict:
     """Fetch SIC + sector for `tickers` into the `securities` table (accumulates by ticker).
 
-    Returns a summary dict: rows written, tickers resolved, tickers with no CIK -- surfaced
-    honestly rather than silently dropped.
+    With `skip_existing`, tickers already classified in `securities` are skipped (resumable for a
+    1500-name universe). A single failing fetch is recorded as missing rather than aborting the run.
+    Returns a summary dict: rows written, tickers resolved, tickers with no CIK / failed lookup.
     """
     snapshot_date = snapshot_date or dt.date.today()
     cik_map = edgar.get_cik_map(cfg)
+
+    if skip_existing:
+        conn0 = storage.connect(cfg)
+        try:
+            if storage.table_exists(conn0, "securities"):
+                already = {r[0] for r in
+                           conn0.execute("SELECT DISTINCT ticker FROM securities").fetchall()}
+                tickers = [t for t in tickers if t.upper() not in already]
+        finally:
+            conn0.close()
 
     rows: list[dict] = []
     resolved: list[str] = []
@@ -101,7 +113,12 @@ def ingest_sectors(
         if cik is None:
             missing_cik.append(tu)
             continue
-        sic, desc = fetch_sic(cik, cfg)
+        try:
+            sic, desc = fetch_sic(cik, cfg)
+        except Exception:
+            missing_cik.append(tu)            # transient SEC error -> skip this name, keep going
+            time.sleep(_REQUEST_DELAY_S)
+            continue
         rows.append({"ticker": tu, "cik": int(cik), "sic": sic,
                      "sic_description": desc, "sector": sic_to_sector(sic)})
         resolved.append(tu)

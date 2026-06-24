@@ -72,14 +72,35 @@ def _pull(tickers: list[str], asof: dt.date) -> None:
     print(f"\n{PERSISTENT_DISCLAIMER}")
 
 
-def _screen(asof: dt.date, top: int) -> None:
+def _floor_cfg(min_cap: float | None, min_adv: float | None, min_price: float | None):
+    """Build a config with relaxed universe-floor overrides (None keeps the configured default)."""
+    over: dict = {}
+    if min_cap is not None:
+        over["min_market_cap_usd"] = min_cap
+    if min_adv is not None:
+        over["min_avg_dollar_volume_usd"] = min_adv
+    if min_price is not None:
+        over["min_price_usd"] = min_price
+    if not over:
+        return config
+    return replace(config, universe_floor=replace(config.universe_floor, **over))
+
+
+def _screen(asof: dt.date, top: int, min_cap: float | None = None,
+            min_adv: float | None = None, min_price: float | None = None) -> None:
+    cfg = _floor_cfg(min_cap, min_adv, min_price)
+    fl = cfg.universe_floor
     conn = storage.connect()
     try:
-        prof = factors.factor_profile(conn, asof)
+        prof = factors.factor_profile(conn, asof, cfg)
     finally:
         conn.close()
+    print(f"Universe floor: mktcap >= ${fl.min_market_cap_usd:,.0f}, 20d ADV >= "
+          f"${fl.min_avg_dollar_volume_usd:,.0f}, price >= ${fl.min_price_usd:.2f}"
+          + ("  (relaxed -- reaches smaller names; data is thinner/noisier down here)"
+             if cfg is not config else ""))
     if prof.empty:
-        print("No data in the universe. Run `pull TICKERS...` first to load some names.")
+        print("No data in the universe. Run `pull TICKERS...` or `pull-universe` first.")
         return
 
     disp = prof.copy()
@@ -211,6 +232,49 @@ def _pull_sp500(asof: dt.date, limit: int) -> None:
     except Exception as exc:  # best-effort; never fail the seed over sectors
         print(f"Sectors:      skipped ({exc})\n")
     _universe(asof)
+
+
+def _pull_universe(index: str, skip: bool, asof: dt.date) -> None:
+    index = index.lower()
+    print(f"Resolving constituents for {index} (current membership; not point-in-time)...")
+    try:
+        if index == "sp1500":
+            comp = reference.sp1500_constituents()
+            for k in ("sp500", "sp400", "sp600"):
+                print(f"  {k}: {len(comp[k])} names")
+            syms = comp["all"]
+        elif index == "sp500":
+            syms = reference.sp500_constituents()
+        elif index == "sp400":
+            syms = reference.sp400_constituents()
+        else:
+            syms = reference.sp600_constituents()
+    except Exception as exc:
+        print(f"Failed to fetch constituents: {exc}")
+        return
+
+    note = "" if skip else " (skip-existing OFF -- re-pulls everything)"
+    print(f"\nUniverse '{index}': {len(syms)} names. Pulling EDGAR + Yahoo + sectors{note}.")
+    print("Resumable: rate-limited + network-flaky; just RE-RUN this command to continue "
+          "(already-loaded names are skipped).\n")
+
+    f = edgar.ingest(syms, skip_existing=skip)
+    print(f"Fundamentals (EDGAR): {f['rows']} rows | resolved={len(f['tickers_resolved'])} "
+          f"missing_cik={len(f['tickers_missing_cik'])} no_facts={len(f['tickers_no_facts'])} "
+          f"skipped(already had)={f.get('skipped', 0)}")
+    p = prices_free.ingest(syms, skip_existing=skip)
+    print(f"Prices (Yahoo):       {p['rows']} rows | resolved={len(p['tickers_resolved'])} "
+          f"no_data={len(p['tickers_no_data'])} skipped(already had)={p.get('skipped', 0)}")
+    try:
+        s = sectors.ingest_sectors(syms, skip_existing=skip)
+        print(f"Sectors (SEC SIC):    {s['rows']} rows | resolved={len(s['tickers_resolved'])} "
+              f"missing_cik={len(s['tickers_missing_cik'])}\n")
+    except Exception as exc:  # best-effort; never fail the pull over sectors
+        print(f"Sectors (SEC SIC):    skipped ({exc})\n")
+    _universe(asof)
+    print("\nNote: backtests over this broad universe are SURVIVORSHIP-BIASED (free PIT membership "
+          "covers only the S&P 500). Screening / valuation / flags on current names are honest.")
+    print(f"\n{PERSISTENT_DISCLAIMER}")
 
 
 def _report(ticker: str, asof: dt.date) -> None:
@@ -387,6 +451,15 @@ def main(argv: list[str] | None = None) -> None:
     screen.add_argument("--asof", default=dt.date.today().isoformat(),
                         help="point-in-time date (YYYY-MM-DD); default today")
     screen.add_argument("--top", type=int, default=50, help="show top N by composite")
+    screen.add_argument("--min-cap", type=float, default=None,
+                        help=f"market-cap floor override (default "
+                             f"${config.universe_floor.min_market_cap_usd:,.0f}); lower it to reach "
+                             f"smaller, less-followed names")
+    screen.add_argument("--min-adv", type=float, default=None,
+                        help=f"20-day ADV floor override (default "
+                             f"${config.universe_floor.min_avg_dollar_volume_usd:,.0f})")
+    screen.add_argument("--min-price", type=float, default=None,
+                        help=f"min price override (default ${config.universe_floor.min_price_usd:.2f})")
 
     report = sub.add_parser("report", help="Per-ticker factor ranks + valuation + flags")
     report.add_argument("ticker", help="e.g. AAPL")
@@ -430,6 +503,17 @@ def main(argv: list[str] | None = None) -> None:
     sp = sub.add_parser("pull-sp500", help="Seed/refresh the universe from current S&P 500 list")
     sp.add_argument("--limit", type=int, default=0, help="only the first N tickers (0 = all 500)")
     sp.add_argument("--asof", default=dt.date.today().isoformat(),
+                    help="point-in-time date (YYYY-MM-DD); default today")
+
+    pu = sub.add_parser(
+        "pull-universe",
+        help="Pull a whole index universe (sp500/sp400/sp600/sp1500=1500 names); RESUMABLE",
+    )
+    pu.add_argument("--index", default="sp1500", choices=["sp500", "sp400", "sp600", "sp1500"],
+                    help="which universe to load (sp1500 = the full large+mid+small composite)")
+    pu.add_argument("--no-skip", action="store_true",
+                    help="re-pull names already loaded (default skips them, so re-runs resume)")
+    pu.add_argument("--asof", default=dt.date.today().isoformat(),
                     help="point-in-time date (YYYY-MM-DD); default today")
 
     pm = sub.add_parser("pull-macro", help="Ingest vintage-aware FRED/ALFRED macro series")
@@ -516,7 +600,8 @@ def main(argv: list[str] | None = None) -> None:
     if args.cmd == "pull":
         _pull(args.tickers, dt.date.fromisoformat(args.asof))
     elif args.cmd == "screen":
-        _screen(dt.date.fromisoformat(args.asof), args.top)
+        _screen(dt.date.fromisoformat(args.asof), args.top,
+                args.min_cap, args.min_adv, args.min_price)
     elif args.cmd == "report":
         _report(args.ticker, dt.date.fromisoformat(args.asof))
     elif args.cmd == "construct":
@@ -528,6 +613,8 @@ def main(argv: list[str] | None = None) -> None:
         _universe(dt.date.fromisoformat(args.asof))
     elif args.cmd == "pull-sp500":
         _pull_sp500(dt.date.fromisoformat(args.asof), args.limit)
+    elif args.cmd == "pull-universe":
+        _pull_universe(args.index, not args.no_skip, dt.date.fromisoformat(args.asof))
     elif args.cmd == "pull-macro":
         _pull_macro(args.series, dt.date.fromisoformat(args.asof))
     elif args.cmd == "pull-sectors":

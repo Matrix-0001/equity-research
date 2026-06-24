@@ -20,7 +20,7 @@ surface caveats. It never produces a number of its own and never overrides a com
 ## Stack & environment
 - Python 3.12 at `%LOCALAPPDATA%\Programs\Python\Python312`; project venv at `.venv`.
 - DuckDB + Parquet for local storage (`./data`, git-ignored). pandas/pyarrow.
-- Run tests: `.venv\Scripts\python -m pytest -q`  (currently **167/167 green**).
+- Run tests: `.venv\Scripts\python -m pytest -q`  (currently **171/171 green**).
 - Optional LLM: `pip install -e .[llm]` + `ANTHROPIC_API_KEY` (default model `claude-opus-4-8`,
   override `EQR_LLM_MODEL`). Without it, narratives read "Not estimated".
 
@@ -66,7 +66,11 @@ pushes (only if green).
 - `data/prices_free.py` — Yahoo chart API → `prices` table (survivorship-biased; documented).
   Fetches full **daily** history via explicit `period1/period2` epoch window (the `range=max`
   keyword silently downsamples to quarterly — never used), so backtests span real regimes.
-- `data/reference.py` — current S&P 500 constituents (seed only; not point-in-time membership).
+- `data/reference.py` — current constituent seeds: S&P 500 (CSV) + **S&P 400 / 600 (Wikipedia, parsed
+  with a tiny stdlib HTML table reader -- no lxml/bs4 dep)** -> `sp1500_constituents()` (~1503 names,
+  large+mid+small). Current membership only (not point-in-time), so broad backtests stay survivorship-
+  biased; screening is honest. EDGAR/Yahoo/sectors ingests are **resumable** (skip-existing + per-batch
+  persistence) so a 1500-name pull survives the flaky network -- re-run to continue.
 - `data/index_membership.py` — **v3 Phase B** survivorship-free PIT S&P 500 membership windows from
   `fja05680/sp500` (MIT) -> `index_membership` table (ticker, start_date, end_date); ~500 names/date
   since 1996, multiple stints. Public facts only; optional `parse_symbol`/`delist_reasons` read
@@ -131,7 +135,8 @@ pushes (only if green).
 - `llm.py` — bounded bull/bear narrative (optional; grounded only in computed figures).
 - `cli.py` — `pull` / `pull-sp500` / `universe` / `screen` / `report` / `construct` / `pull-macro` /
   `macro` / `exposures` / `pull-sectors` / `backtest` / `backtest-compare` / `pull-index-history` /
-  `pull-simfin`.
+  `pull-simfin` / **`pull-universe`** (sp500/sp400/sp600/sp1500, resumable). `screen` takes
+  `--min-cap/--min-adv/--min-price` to relax the floor toward smaller, less-followed names.
 
 ## Status & data lane
 - **Phase 0 + v1 + v2 + v3 (Phase A, B & C) complete.** Data lanes are all **free**: EDGAR

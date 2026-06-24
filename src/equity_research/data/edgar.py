@@ -230,51 +230,72 @@ def ingest(
     tickers: list[str],
     cfg: Config = config,
     snapshot_date: dt.date | None = None,
+    skip_existing: bool = False,
+    batch_size: int = 50,
 ) -> dict:
     """Fetch + load fundamentals for `tickers` into the `fundamentals` table.
 
-    Returns a summary dict: row count, tickers resolved, and tickers with no CIK
-    or no usable facts (surfaced honestly rather than silently dropped).
+    RESUMABLE for large universes (e.g. the S&P 1500): with `skip_existing`, tickers already in the
+    `fundamentals` table are skipped, and progress is persisted every `batch_size` names (per-batch
+    parquet snapshot + upsert) so a pull cut short by the flaky network can simply be RE-RUN to
+    continue. A single failing fetch is recorded (no_facts) rather than aborting the whole pull.
+    Returns a summary dict (rows, resolved, missing_cik, no_facts, skipped) -- surfaced honestly.
     """
     snapshot_date = snapshot_date or dt.date.today()
     cik_map = get_cik_map(cfg)
-
-    frames: list[pd.DataFrame] = []
-    resolved: list[str] = []
-    missing_cik: list[str] = []
-    no_facts: list[str] = []
-
-    for t in tickers:
-        cik = cik_map.get(t.upper())
-        if cik is None:
-            missing_cik.append(t)
-            continue
-        df = extract_fundamentals(t.upper(), fetch_company_facts(cik, cfg))
-        if df.empty:
-            no_facts.append(t)
-        else:
-            frames.append(df)
-            resolved.append(t.upper())
-        time.sleep(_REQUEST_DELAY_S)
-
-    summary = {
-        "rows": 0,
-        "tickers_resolved": resolved,
-        "tickers_missing_cik": missing_cik,
-        "tickers_no_facts": no_facts,
-    }
-    if not frames:
-        return summary
-
-    allf = pd.concat(frames, ignore_index=True)
     conn = storage.connect(cfg)
     try:
-        storage.write_snapshot(
-            conn, allf, "fundamentals", source="SEC EDGAR companyfacts",
-            vendor="edgar", snapshot_date=snapshot_date, cfg=cfg,
-        )
-        storage.upsert_by_ticker(conn, allf, "fundamentals")
+        already: set[str] = set()
+        if skip_existing and storage.table_exists(conn, "fundamentals"):
+            already = {r[0] for r in
+                       conn.execute("SELECT DISTINCT ticker FROM fundamentals").fetchall()}
+        todo = [t for t in tickers if t.upper() not in already]
+        skipped = len(tickers) - len(todo)
+
+        resolved: list[str] = []
+        missing_cik: list[str] = []
+        no_facts: list[str] = []
+        frames: list[pd.DataFrame] = []
+        rows = 0
+        batch_no = 0
+
+        def _flush() -> None:
+            nonlocal frames, rows, batch_no
+            if not frames:
+                return
+            batch = pd.concat(frames, ignore_index=True)
+            storage.write_snapshot(
+                conn, batch, "fundamentals", source="SEC EDGAR companyfacts", vendor="edgar",
+                snapshot_date=snapshot_date, cfg=cfg, suffix=f"_b{batch_no:03d}",
+            )
+            storage.upsert_by_ticker(conn, batch, "fundamentals")
+            rows += len(batch)
+            batch_no += 1
+            frames = []
+
+        for i, t in enumerate(todo, start=1):
+            cik = cik_map.get(t.upper())
+            if cik is None:
+                missing_cik.append(t.upper())
+                continue
+            try:
+                df = extract_fundamentals(t.upper(), fetch_company_facts(cik, cfg))
+            except Exception:
+                no_facts.append(t.upper())          # one bad name shouldn't abort a 1500-name pull
+                time.sleep(_REQUEST_DELAY_S)
+                continue
+            if df.empty:
+                no_facts.append(t.upper())
+            else:
+                frames.append(df)
+                resolved.append(t.upper())
+            time.sleep(_REQUEST_DELAY_S)
+            if i % batch_size == 0:
+                _flush()
+                print(f"  ... edgar {i}/{len(todo)} ({len(resolved)} resolved) - progress saved",
+                      flush=True)
+        _flush()
+        return {"rows": rows, "tickers_resolved": resolved, "tickers_missing_cik": missing_cik,
+                "tickers_no_facts": no_facts, "skipped": skipped}
     finally:
         conn.close()
-    summary["rows"] = len(allf)
-    return summary
