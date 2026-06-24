@@ -210,7 +210,9 @@ class BacktestResult:
             else:
                 lines.append(f"  {label:<16} {NOT_ESTIMATED} (no periods in this run's window)")
         lines.append("  (Regime windows: dot-com 2000-2002, GFC 2007-2009, COVID 2020, 2022 "
-                     "drawdown; else normal.)")
+                     "drawdown; else normal.")
+        lines.append("   Per-regime maxDD is measured WITHIN that regime's periods, not the path's "
+                     "global drawdown.)")
         return lines
 
     def _locked_test_lines(self) -> list[str]:

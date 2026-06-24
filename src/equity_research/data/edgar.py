@@ -144,10 +144,16 @@ def _pick_value(
         return None
     flows = [t for t in nonnull if t[1]]
     if flows:
-        def _key(t: tuple[int, str | None, str, float | None]) -> tuple[int, int]:
-            dur = (dt.date.fromisoformat(t[2]) - dt.date.fromisoformat(t[1])).days
-            return (abs(dur - target_days), t[0])
-        return min(flows, key=_key)[3]
+        def _dur(t: tuple[int, str | None, str, float | None]) -> int:
+            return (dt.date.fromisoformat(t[2]) - dt.date.fromisoformat(t[1])).days
+        best = min(flows, key=lambda t: (abs(_dur(t) - target_days), t[0]))
+        # Refuse to MISLABEL a wrong-duration flow as the period figure: a 10-Q's cash-flow
+        # statement, for instance, is reported year-to-date only (no clean 3-month value), so the
+        # closest available duration can be a 6-/9-month YTD. If even the nearest flow is off by
+        # more than ~40% of the target, return None ("Not estimated") rather than overstate it.
+        if abs(_dur(best) - target_days) > 0.4 * target_days:
+            return None
+        return best[3]
     return min(nonnull, key=lambda t: t[0])[3]  # instant: highest-priority tag
 
 

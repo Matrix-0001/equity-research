@@ -63,3 +63,34 @@ def test_instant_and_shares_extracted():
     assert row["shares_outstanding"] == 1000        # cover-page count (latest end)
     assert str(row["reportperiod"].date()) == "2026-03-31"
     assert str(row["datekey"].date()) == "2026-05-01"
+
+
+# A 10-Q cash-flow statement is reported YEAR-TO-DATE only (no clean 3-month figure). The
+# extractor must NOT mislabel that 6-month YTD value as the quarter -> it reads "Not estimated".
+YTD_ONLY_FACTS = {
+    "facts": {
+        "us-gaap": {
+            "NetCashProvidedByUsedInOperatingActivities": {
+                "units": {"USD": [
+                    {"accn": "q2", "start": "2026-01-01", "end": "2026-06-30",  # 181d YTD
+                     "val": 500, "filed": "2026-08-01", "form": "10-Q"},
+                ]}
+            },
+            "Assets": {  # instant, same period end -> sets reportperiod
+                "units": {"USD": [
+                    {"accn": "q2", "end": "2026-06-30", "val": 9000,
+                     "filed": "2026-08-01", "form": "10-Q"},
+                ]}
+            },
+        }
+    }
+}
+
+
+def test_quarterly_flow_with_only_ytd_is_not_estimated():
+    import pandas as pd
+
+    row = extract_fundamentals("T", YTD_ONLY_FACTS).set_index("form").loc["10-Q"]
+    # 181-day YTD is > 40% off the 90-day quarter target -> refused, not overstated.
+    assert pd.isna(row["operating_cash_flow"])
+    assert row["total_assets"] == 9000              # the instant item is still fine

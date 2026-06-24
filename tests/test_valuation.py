@@ -68,3 +68,53 @@ def test_relative_multiples(conn):
     assert df.loc["C", "pe"] == pytest.approx(40.0)
     assert stats["pe"]["median"] == pytest.approx(20.0)
     assert df.loc["C", "ps"] == pytest.approx(0.5)
+
+
+def test_reverse_dcf_flags_material_leverage(tmp_path):
+    # A firm with positive FCF but liabilities = 80% of assets: the implied-growth read must carry
+    # the honesty caveat that the FCF-vs-equity proxy is especially loose under material leverage.
+    c = storage.connect(Config(data_dir=tmp_path))
+    dates = pd.bdate_range(end="2026-06-12", periods=30)
+    px = pd.DataFrame([
+        {"ticker": "LEV", "date": d, "closeadj": 10.0, "closeunadj": 10.0, "volume": 1_000_000}
+        for d in dates
+    ])
+    storage.load_table(c, px, "prices")
+    fund = pd.DataFrame([{
+        "ticker": "LEV", "datekey": pd.Timestamp("2025-12-15"),
+        "reportperiod": pd.Timestamp("2025-09-30"), "form": "10-K",
+        "operating_cash_flow": 2.0e8, "capex": 5.0e7,           # fcf0 = 1.5e8 > 0
+        "shares_outstanding": 1.0e8,                            # mcap = 10 * 1e8 = 1e9
+        "total_assets": 1.0e10, "total_liabilities": 8.0e9,    # liab/assets = 0.8 > 0.6
+    }])
+    storage.load_table(c, fund, "fundamentals")
+    try:
+        res = valuation.valuation_for(c, AS_OF, "LEV", Config(data_dir=tmp_path))
+    finally:
+        c.close()
+    assert res.implied_growth is not None
+    assert "leverage" in res.note.lower()
+
+
+def test_reverse_dcf_low_leverage_has_indicative_caveat_only(tmp_path):
+    c = storage.connect(Config(data_dir=tmp_path))
+    dates = pd.bdate_range(end="2026-06-12", periods=30)
+    px = pd.DataFrame([
+        {"ticker": "LOW", "date": d, "closeadj": 10.0, "closeunadj": 10.0, "volume": 1_000_000}
+        for d in dates
+    ])
+    storage.load_table(c, px, "prices")
+    fund = pd.DataFrame([{
+        "ticker": "LOW", "datekey": pd.Timestamp("2025-12-15"),
+        "reportperiod": pd.Timestamp("2025-09-30"), "form": "10-K",
+        "operating_cash_flow": 2.0e8, "capex": 5.0e7, "shares_outstanding": 1.0e8,
+        "total_assets": 1.0e10, "total_liabilities": 2.0e9,    # liab/assets = 0.2 (low)
+    }])
+    storage.load_table(c, fund, "fundamentals")
+    try:
+        res = valuation.valuation_for(c, AS_OF, "LOW", Config(data_dir=tmp_path))
+    finally:
+        c.close()
+    assert res.implied_growth is not None
+    assert "indicative" in res.note.lower()
+    assert "leverage" not in res.note.lower()      # not flagged when leverage is modest

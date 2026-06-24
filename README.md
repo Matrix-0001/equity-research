@@ -63,13 +63,14 @@ cost.* **v3 Phase C: out-of-sample discipline** — Probabilistic + Deflated Sha
 `backtest-compare` race (multiple-testing-correct, selects in-sample only), a multi-regime stress
 table (dot-com / GFC / COVID / 2022 / normal; unreached regimes read "Not estimated"), and locked-test
 enforcement (in-sample vs out-of-sample tail). Python 3.12 + `.venv`
-installed; **159/159 tests pass** (point-in-time, survivorship-free universe, EDGAR
+installed; **165/165 tests pass** (point-in-time, survivorship-free universe, EDGAR
 flow-duration logic, factor math, flags, valuation, upsert persistence, report assembly, LLM parsing,
 v2 portfolio weighting / position+sector+liquidity caps / Kelly, vintage-aware FRED/ALFRED macro,
 macro exposure regressions, SIC->sector mapping, v3 cost model / metrics / walk-forward engine
 incl. no-lookahead, cost accounting, NAV compounding, delisting, cash conservation, benchmark, the
 SimFin price parser, PIT index membership, a survivorship-lane test that a delisted crash is felt,
-and Phase C's Deflated Sharpe / PSR / normal-CDF / regime tagging / locked-test split / compare race).
+and Phase C's Deflated Sharpe / PSR / normal-CDF / regime tagging / locked-test split / compare race,
+and survivorship-robust pairwise+PSD covariance that a delisted name can't truncate).
 Stack: Python + DuckDB/Parquet.
 
 **Data sources (free, no subscription):**
@@ -89,7 +90,7 @@ the storage / point-in-time / universe / factor layers don't change.
 
 ### Quickstart
 ```
-.venv\Scripts\python -m pytest -q                                     # 159/159
+.venv\Scripts\python -m pytest -q                                     # 165/165
 .venv\Scripts\python -m equity_research.cli pull-sp500 --limit 50     # seed the universe (accumulates)
 .venv\Scripts\python -m equity_research.cli universe                  # what's loaded
 .venv\Scripts\python -m equity_research.cli screen                    # factor ranks, whole universe

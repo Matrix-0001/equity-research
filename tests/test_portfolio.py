@@ -388,3 +388,101 @@ def test_covariance_is_point_in_time(tmp_path):
     assert early.n_obs == 30
     assert late.n_obs == 60
     assert early.n_obs < late.n_obs  # the cutoff genuinely binds
+
+
+# --------------------------------------------------------------------------- #
+# Survivorship-robust covariance (the delisted-name fix): a name that stops
+# trading mid-window must NOT truncate every other name's history.
+# --------------------------------------------------------------------------- #
+def _prices_on_grid(ticker: str, returns: list[float], grid, start_price: float = 100.0,
+                    volume: float = 1_000_000) -> pd.DataFrame:
+    px, p = [start_price], start_price
+    for r in returns:
+        p *= (1.0 + r)
+        px.append(p)
+    return pd.DataFrame([
+        {"ticker": ticker, "date": d, "closeadj": v, "closeunadj": v, "volume": volume}
+        for d, v in zip(grid, px, strict=True)
+    ])
+
+
+def test_delisted_name_does_not_truncate_others_history(tmp_path):
+    # AA/BB trade the full 200-return window; DEAD trades only the first 100 then delists. The OLD
+    # common-window covariance (dropna how=any) would shrink EVERY name to DEAD's first-100 days,
+    # changing AA's variance. The fix keeps AA's variance on its OWN full history.
+    cfg = Config(data_dir=tmp_path,
+                 portfolio=PortfolioConfig(min_return_obs=30, cov_lookback_days=400))
+    c = storage.connect(cfg)
+    grid = pd.bdate_range(end="2026-06-12", periods=201)        # 200 returns
+    rng = np.random.default_rng(1)
+    # AA: calm first half, volatile second half -> full-history var >> first-100 var.
+    aa = np.concatenate([rng.normal(0, 0.005, 100), rng.normal(0, 0.02, 100)]).tolist()
+    bb = rng.normal(0, 0.01, 200).tolist()
+    dead = rng.normal(0, 0.01, 100).tolist()                   # only the first 100 returns
+    try:
+        storage.load_table(c, pd.concat([
+            _prices_on_grid("AA", aa, grid),
+            _prices_on_grid("BB", bb, grid),
+            _prices_on_grid("DEAD", dead, grid[:101]),         # delists after 100 returns
+        ], ignore_index=True), "prices")
+        with_dead = pf.estimate_covariance(c, grid[-1].date(), ["AA", "BB", "DEAD"], cfg)
+        without_dead = pf.estimate_covariance(c, grid[-1].date(), ["AA", "BB"], cfg)
+    finally:
+        c.close()
+
+    assert "DEAD" in with_dead.tickers                         # delisted name kept, not dropped
+    full_var = float(np.var(aa, ddof=1)) * 252.0
+    calm_var = float(np.var(aa[:100], ddof=1)) * 252.0
+    assert full_var > 1.5 * calm_var                           # regimes differ -> invariance is non-trivial
+    i = with_dead.tickers.index("AA")
+    j = without_dead.tickers.index("AA")
+    assert with_dead.cov[i, i] == pytest.approx(full_var, rel=1e-6)        # AA uses its FULL history
+    assert with_dead.cov[i, i] == pytest.approx(without_dead.cov[j, j], rel=1e-6)  # DEAD doesn't truncate AA
+    assert with_dead.n_obs == 100 and without_dead.n_obs == 200           # DEAD is the thin leg only
+    assert float(np.linalg.eigvalsh(with_dead.cov).min()) >= -1e-8        # matrix is PSD
+
+
+def test_nonoverlapping_pair_gets_zero_covariance_and_is_flagged(tmp_path):
+    # Two names whose trading windows don't overlap at all -> no joint history. Covariance is set
+    # to 0 (no information) and counted, never fabricated; the matrix stays PSD (diagonal).
+    cfg = Config(data_dir=tmp_path,
+                 portfolio=PortfolioConfig(min_return_obs=30, cov_lookback_days=400))
+    c = storage.connect(cfg)
+    grid = pd.bdate_range(end="2026-06-12", periods=201)
+    rng = np.random.default_rng(2)
+    try:
+        storage.load_table(c, pd.concat([
+            _prices_on_grid("EARLY", rng.normal(0, 0.01, 60).tolist(), grid[:61]),
+            _prices_on_grid("LATE", rng.normal(0, 0.01, 80).tolist(), grid[120:201]),
+        ], ignore_index=True), "prices")
+        ce = pf.estimate_covariance(c, grid[-1].date(), ["EARLY", "LATE"], cfg)
+    finally:
+        c.close()
+    assert set(ce.tickers) == {"EARLY", "LATE"}
+    e, ln = ce.tickers.index("EARLY"), ce.tickers.index("LATE")
+    assert ce.cov[e, ln] == 0.0                               # disjoint windows -> 0 covariance
+    assert ce.n_thin_pairs == 1
+    assert float(np.linalg.eigvalsh(ce.cov).min()) >= -1e-8
+
+
+def test_construct_on_ragged_universe_allocates_the_delisted_name(tmp_path):
+    cfg = Config(data_dir=tmp_path,
+                 portfolio=PortfolioConfig(min_return_obs=30, cov_lookback_days=400,
+                                           max_position_weight=1.0))
+    c = storage.connect(cfg)
+    grid = pd.bdate_range(end="2026-06-12", periods=201)
+    rng = np.random.default_rng(3)
+    try:
+        storage.load_table(c, pd.concat([
+            _prices_on_grid("AA", rng.normal(0, 0.01, 200).tolist(), grid),
+            _prices_on_grid("BB", rng.normal(0, 0.012, 200).tolist(), grid),
+            _prices_on_grid("DEAD", rng.normal(0, 0.011, 100).tolist(), grid[:101]),
+        ], ignore_index=True), "prices")
+        res = pf.construct_portfolio(c, grid[-1].date(), tickers=["AA", "BB", "DEAD"],
+                                     method="hrp", cfg=cfg)
+    finally:
+        c.close()
+    assert res.weights is not None
+    assert res.weights.sum() == pytest.approx(1.0, abs=1e-6)
+    assert "DEAD" in res.weights.index                        # delisted name still allocated
+    assert res.dropped == {}

@@ -41,7 +41,8 @@ def _valuation_str(val: valuation.ValuationResult) -> str:
         v, st = val.multiples.get(m), val.peer_stats.get(m)
         if v is not None and st:
             pieces.append(f"{label} {v:.1f} vs peer median {st['median']:.1f}")
-    return "; ".join(pieces)
+    s = "; ".join(pieces)
+    return f"{s}  [{val.note}]" if val.note else s
 
 
 def _flags_str(flg: dict) -> str:

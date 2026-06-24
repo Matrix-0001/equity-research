@@ -46,7 +46,30 @@ class CovEstimate:
     corr: np.ndarray              # correlation (n x n)
     vols: np.ndarray              # annualized volatilities (n,)
     dropped: dict[str, str]       # ticker -> reason it was excluded
-    n_obs: int                    # aligned daily-return observations used
+    n_obs: int                    # min own-history daily-return count among kept names
+    n_thin_pairs: int = 0         # name-pairs with too little overlap -> 0 covariance (flagged)
+
+
+def _nearest_psd(cov: np.ndarray, tol: float = 1e-10) -> tuple[np.ndarray, bool]:
+    """Project a symmetric matrix to the nearest positive-semi-definite one (eigenvalue flooring).
+
+    Pairwise covariance (used below so delisted names keep their full history) is not guaranteed
+    PSD, but risk_parity / HRP assume it. If the matrix is ALREADY PSD (smallest eigenvalue
+    >= -tol*scale) it is returned UNCHANGED -- so a complete-data estimate stays bit-for-bit exact
+    and never picks up reconstruction noise. Otherwise negative eigenvalues are clipped to a tiny
+    positive floor and the matrix rebuilt. Returns (matrix, was_adjusted).
+    """
+    sym = 0.5 * (cov + cov.T)
+    if sym.shape[0] == 0:
+        return sym, False
+    vals = np.linalg.eigvalsh(sym)
+    scale = float(np.abs(vals).max()) or 1.0
+    if float(vals.min()) >= -tol * scale:
+        return sym, False
+    eigvals, eigvecs = np.linalg.eigh(sym)
+    eigvals = np.clip(eigvals, tol * scale, None)
+    psd = (eigvecs * eigvals) @ eigvecs.T
+    return 0.5 * (psd + psd.T), True
 
 
 def estimate_covariance(
@@ -58,8 +81,18 @@ def estimate_covariance(
     """Annualized covariance/correlation from PIT daily returns over the kept names.
 
     Names with fewer than `min_return_obs` daily returns, or zero return variance over the
-    window, are dropped (with a reason) instead of being imputed. Survivors are aligned on
-    their common trading dates before the sample covariance is taken.
+    window, are dropped (with a reason) instead of being imputed.
+
+    Survivorship-robust estimation (so a delisted name doesn't sabotage the matrix):
+      - the DIAGONAL is each name's variance over its OWN full available history (never truncated
+        to a window common to every survivor);
+      - OFF-DIAGONALS are PAIRWISE covariances over each pair's overlapping returns; a pair that
+        overlaps fewer than `min_return_obs` days carries 0 covariance (treated as no information,
+        counted in `n_thin_pairs`) rather than forcing every name onto one shared window.
+    The pairwise matrix is then projected to the nearest PSD matrix (a no-op for complete data),
+    because risk_parity / HRP assume positive semi-definiteness. For names that all trade the full
+    window (the free lane), this is identical to the old common-window estimate -- only the ragged
+    (delisted) case changes, and for the better.
     """
     pcfg = cfg.portfolio
     tickers = [t.upper() for t in dict.fromkeys(tickers)]  # de-dup, preserve order
@@ -74,7 +107,7 @@ def estimate_covariance(
 
     wide = px.pivot_table(index="date", columns="ticker", values="closeadj").sort_index()
     rets = wide.pct_change()
-    counts = rets.count()  # non-NaN returns per name
+    counts = rets.count()  # non-NaN returns per name (its own history depth)
 
     keep = []
     for t in tickers:
@@ -86,21 +119,30 @@ def estimate_covariance(
     if not keep:
         return empty
 
-    aligned = rets[keep].dropna(how="any")  # common trading dates across survivors
-    stds = aligned.std(ddof=1)
-    nonzero = [t for t in keep if stds.get(t, 0.0) > 0.0]
+    sub = rets[keep]                       # ragged: NaN where a (delisted) name wasn't trading
+    stds = sub.std(ddof=1)                  # each name's OWN-history volatility (skips NaN)
+    nonzero = [t for t in keep if float(stds.get(t, 0.0)) > 0.0]
     for t in keep:
         if t not in nonzero:
             dropped[t] = "zero return variance over the window (flat price)"
     if not nonzero:
         return empty
-    aligned = aligned[nonzero]
+    sub = sub[nonzero]
 
-    cov_daily = aligned.cov()        # ddof=1
-    corr = aligned.corr().values
-    cov = cov_daily.values * 252.0   # annualize
-    vols = np.sqrt(np.diag(cov))
-    return CovEstimate(list(aligned.columns), cov, corr, vols, dropped, len(aligned))
+    var_daily = sub.var(ddof=1)                                  # per-name, full own history
+    cov_pairwise = sub.cov(min_periods=pcfg.min_return_obs)      # NaN where overlap is too thin
+    C = cov_pairwise.to_numpy().copy()
+    np.fill_diagonal(C, var_daily.reindex(sub.columns).to_numpy())
+    off_diag = ~np.eye(C.shape[0], dtype=bool)
+    n_thin_pairs = int(np.isnan(C[off_diag]).sum() // 2)         # symmetric -> count once
+    C[np.isnan(C)] = 0.0                                         # thin/absent overlap -> 0 cov
+    C, _ = _nearest_psd(C)
+
+    cov = C * 252.0                                              # annualize
+    vols = np.sqrt(np.clip(np.diag(cov), 0.0, None))
+    corr = _cov_to_corr(cov)
+    n_obs = min(int(counts[t]) for t in nonzero)                # thinnest own-history depth
+    return CovEstimate(list(sub.columns), cov, corr, vols, dropped, n_obs, n_thin_pairs)
 
 
 # --------------------------------------------------------------------------- #
@@ -535,8 +577,13 @@ def construct_portfolio(
         )
     if ce.n_obs < pcfg.min_return_obs:
         notes.append(
-            f"covariance rests on {ce.n_obs} aligned daily returns "
-            f"(< {pcfg.min_return_obs} target); confidence reduced"
+            f"covariance rests on {ce.n_obs} daily returns (thinnest name; "
+            f"< {pcfg.min_return_obs} target); confidence reduced"
+        )
+    if ce.n_thin_pairs:
+        notes.append(
+            f"{ce.n_thin_pairs} name-pair(s) overlapped < {pcfg.min_return_obs} days -> their "
+            f"covariance was set to 0 (no joint history, e.g. a delisted name); not fabricated"
         )
     kept, cov = ce.tickers, ce.cov
     assumptions: list[str] = []

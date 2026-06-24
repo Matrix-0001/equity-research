@@ -136,6 +136,7 @@ def valuation_for(
     t = ticker.upper()
     hist = pit.fundamentals_asof(conn, as_of, [t], forms=pit.ANNUAL_FORMS)
     fcf0 = None
+    liab = ta = None
     if not hist.empty:
         row = hist.iloc[0]
         ocf = row.get("operating_cash_flow")
@@ -143,6 +144,7 @@ def valuation_for(
         if pd.notna(ocf) and pd.notna(capex):
             fcf0 = float(ocf) - float(capex)
         shares = row.get("shares_outstanding")
+        liab, ta = row.get("total_liabilities"), row.get("total_assets")
     else:
         shares = None
     price = pit.last_price(conn, as_of, t)
@@ -152,5 +154,17 @@ def valuation_for(
     mult = {m: (float(df.loc[t, m]) if (t in df.index and pd.notna(df.loc[t, m])) else None)
             for m in ("pe", "pb", "ps")} if not df.empty else {}
 
-    note = "" if fcf0 and fcf0 > 0 else "Reverse-DCF needs positive trailing free cash flow."
-    return ValuationResult(t, implied_growth(mcap, fcf0, vcfg), mult, stats, note)
+    ig = implied_growth(mcap, fcf0, vcfg)
+    if ig is None:
+        note = "Reverse-DCF needs positive trailing free cash flow."
+    else:
+        # Honesty caveat: the model discounts FCF (~FCFF) at a flat rate and equates it to the
+        # EQUITY market cap. That FCFF-vs-equity proxy is fine for low-debt firms but loose for
+        # leveraged ones, so the implied growth is indicative, never a fair value.
+        note = ("reverse-DCF equates FCF to equity value -- an indicative implied-growth range, "
+                "not a fair value")
+        if (pd.notna(liab) and pd.notna(ta) and ta and float(ta) > 0
+                and float(liab) / float(ta) > 0.6):
+            note += (f"; especially loose here -- material leverage "
+                     f"(liabilities ~{float(liab) / float(ta) * 100:.0f}% of assets)")
+    return ValuationResult(t, ig, mult, stats, note)

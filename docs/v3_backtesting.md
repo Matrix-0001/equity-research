@@ -186,6 +186,33 @@ existing engine output, so it needed no new data source. Choices made for honest
 - **No scipy dependency added** -- the normal CDF/inverse-CDF are implemented and unit-tested against
   known quantiles, keeping the install foot-print unchanged.
 
+### Post-Phase-C hardening (2026-06-24): survivorship-robust covariance
+
+A code audit found that `portfolio.estimate_covariance` aligned survivors with `dropna(how="any")`
+before taking the sample covariance -- so a single name that delisted mid-lookback truncated EVERY
+name to the days before that delisting. That quietly compromised hrp / risk_parity / inverse_variance
+on the `simfin` (survivorship-free) lane -- exactly the lane built to include delisted names. Fix: the
+diagonal now uses each name's OWN full history; off-diagonals are PAIRWISE over each pair's overlap (a
+pair overlapping < `min_return_obs` days carries 0 covariance, counted in `n_thin_pairs`, never
+fabricated); the result is projected to the nearest PSD matrix so risk_parity / HRP stay well-defined.
+**Effect on prior results:** the free lane (current names, full overlap) is bit-for-bit unchanged --
+only the ragged/delisted case changes, and for the better. Pinned by three new tests (a delisted name
+no longer truncates others' variance; non-overlapping pairs -> 0 covariance + flagged; ragged
+end-to-end hrp). Shrinkage (e.g. Ledoit-Wolf) remains a possible future upgrade.
+
+A second audit pass (2026-06-24) re-derived every formula (Altman/Beneish/Piotroski constants, the
+two-stage reverse-DCF, the Lo-2002 Sharpe SE, PSR/DSR, ERC/HRP/Kelly/OLS) and checked every API field
+mapping (EDGAR filing-date keying, ALFRED vintages incl. NBER USREC, fja05680 membership, SIC->sector).
+All formulas verified correct. Two low-severity hardening fixes landed: (1) EDGAR `_pick_value` now
+**refuses to mislabel a wrong-duration flow** -- a 10-Q cash-flow statement is YTD-only, so if even the
+nearest flow duration is >40% off the period target the field reads "Not estimated" instead of
+overstating it (latent; annual reads, which valuation/flags/factors use, are unchanged); (2) the
+reverse-DCF read now carries an explicit **indicative-not-fair-value caveat**, strengthened when a firm
+carries material leverage (liabilities > 60% of assets), since the model equates FCF to equity value.
+Remaining known items (perf/edge, not correctness): HRP O(n^3) on large baskets; compare re-runs the
+benchmark per strategy; a holding gone >staleness-window stale is marked to its last price by the
+engine but a name absent for >400 calendar days would mark to 0 (near-unreachable).
+
 ---
 
 ## How to start the next session (paste into the new chat)
@@ -197,7 +224,7 @@ existing engine output, so it needed no new data source. Choices made for honest
 > (the v3 build spec — especially **§8 "Phase C — how to proceed"**).
 >
 > State of play: **v1 + v2 + v3 Phase A, B & C are COMPLETE** (Phase C committed when you ask) on GitHub
-> `Matrix-0001/equity-research` (`main`); **159/159 tests pass** (`.venv\Scripts\python -m pytest -q`).
+> `Matrix-0001/equity-research` (`main`); **165/165 tests pass** (`.venv\Scripts\python -m pytest -q`).
 > ALL data is FREE: EDGAR fundamentals + Yahoo prices (deep daily) + FRED/ALFRED macro; and for
 > survivorship-free backtests, **fja05680 point-in-time S&P 500 membership (MIT) + SimFin free delisted
 > prices (~2019+)**. Keys `FRED_API_KEY`, `FMP_API_KEY`, `SIMFIN_API_KEY` are in the local `.env`

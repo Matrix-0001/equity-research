@@ -20,7 +20,7 @@ surface caveats. It never produces a number of its own and never overrides a com
 ## Stack & environment
 - Python 3.12 at `%LOCALAPPDATA%\Programs\Python\Python312`; project venv at `.venv`.
 - DuckDB + Parquet for local storage (`./data`, git-ignored). pandas/pyarrow.
-- Run tests: `.venv\Scripts\python -m pytest -q`  (currently **159/159 green**).
+- Run tests: `.venv\Scripts\python -m pytest -q`  (currently **165/165 green**).
 - Optional LLM: `pip install -e .[llm]` + `ANTHROPIC_API_KEY` (default model `claude-opus-4-8`,
   override `EQR_LLM_MODEL`). Without it, narratives read "Not estimated".
 
@@ -94,7 +94,11 @@ pushes (only if green).
 - `report.py` — assembles the full `SecurityReport` from the above.
 - `portfolio.py` — **v2** risk-based weighting (inverse-variance / equal-risk-contribution /
   HRP, all pure-numpy), position + liquidity caps, and bounded fractional-Kelly (pure math;
-  requires an explicit expected-return vector -- the tool never fabricates `mu`). PIT covariance.
+  requires an explicit expected-return vector -- the tool never fabricates `mu`). PIT covariance is
+  **survivorship-robust**: each name's variance uses its OWN full history and off-diagonals are
+  PAIRWISE (a delisted name no longer truncates everyone to a common window), then projected to the
+  nearest PSD matrix; thin/absent overlaps carry 0 covariance (flagged, never fabricated). Free-lane
+  (full-overlap) results are unchanged by this; only the ragged/simfin lane improves.
 - `costs.py` — **v3** pure transaction-cost model: half-spread + commission + sqrt-law market
   impact in ADV participation; unknown/thin ADV charged at the participation cap (conservative,
   never skipped). Hand-testable.
