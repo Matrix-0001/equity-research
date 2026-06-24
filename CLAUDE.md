@@ -20,7 +20,7 @@ surface caveats. It never produces a number of its own and never overrides a com
 ## Stack & environment
 - Python 3.12 at `%LOCALAPPDATA%\Programs\Python\Python312`; project venv at `.venv`.
 - DuckDB + Parquet for local storage (`./data`, git-ignored). pandas/pyarrow.
-- Run tests: `.venv\Scripts\python -m pytest -q`  (currently **165/165 green**).
+- Run tests: `.venv\Scripts\python -m pytest -q`  (currently **167/167 green**).
 - Optional LLM: `pip install -e .[llm]` + `ANTHROPIC_API_KEY` (default model `claude-opus-4-8`,
   override `EQR_LLM_MODEL`). Without it, narratives read "Not estimated".
 
@@ -121,6 +121,13 @@ pushes (only if green).
   **Phase C:** every run reports its PSR + per-regime stress table + (if `locked_test_start` set)
   in-sample vs out-of-sample split; **`compare_backtests`** races N strategies, Deflated-Sharpes each
   (`n_trials=N`), and selects on the IN-SAMPLE window only (locked tail scored once).
+- `_cache.py` — run-scoped memoization (`cache_get`) for the backtest hot path: a plain dict created
+  in `run_backtest` / `compare_backtests` and threaded (default None = off) through `screening_universe`
+  / `factor_profile` / `estimate_covariance` / `sectors_for`. Memoizes only PIT-deterministic views by
+  date (+ ticker-set for covariance), so it is numerically lossless and discarded per run (no global
+  staleness). `compare_backtests` shares one cache across strategies + skips the per-strategy benchmark
+  (`with_benchmark=False`) -> compare 90s->35s on the 57-name set. NEXT perf step (full S&P 500) is
+  algorithmic: HRP is O(n^3), so cap the construction universe / precompute in the UI layer.
 - `llm.py` — bounded bull/bear narrative (optional; grounded only in computed figures).
 - `cli.py` — `pull` / `pull-sp500` / `universe` / `screen` / `report` / `construct` / `pull-macro` /
   `macro` / `exposures` / `pull-sectors` / `backtest` / `backtest-compare` / `pull-index-history` /

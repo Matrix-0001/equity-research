@@ -22,6 +22,7 @@ import datetime as dt
 import duckdb
 import pandas as pd
 
+from equity_research._cache import cache_get
 from equity_research.config import Config, config
 from equity_research.data import pit, storage
 
@@ -62,13 +63,24 @@ def screening_universe(
     conn: duckdb.DuckDBPyConnection,
     as_of: dt.date,
     cfg: Config = config,
+    _cache: dict | None = None,
 ) -> pd.DataFrame:
     """Liquid investable universe as of `as_of`, with the columns used to filter it.
 
     Returns ticker + market_cap + avg_dollar_volume + last_price for names that pass
     every floor, so the filter is fully auditable (you can see why each name made it
-    in, and inspect names just below a threshold).
+    in, and inspect names just below a threshold). `_cache` (run-scoped, optional) memoizes
+    the result by `as_of` + config so a backtest doesn't recompute it several times per rebalance.
     """
+    return cache_get(
+        _cache, ("screen", as_of.isoformat(), id(cfg)),
+        lambda: _screening_universe(conn, as_of, cfg),
+    )
+
+
+def _screening_universe(
+    conn: duckdb.DuckDBPyConnection, as_of: dt.date, cfg: Config
+) -> pd.DataFrame:
     floor = cfg.universe_floor
     window = floor.avg_dollar_volume_window_days
     empty = pd.DataFrame(columns=["ticker", "market_cap", "avg_dollar_volume", "last_price"])

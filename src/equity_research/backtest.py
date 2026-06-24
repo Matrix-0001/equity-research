@@ -82,9 +82,11 @@ def _close_on(
     return out
 
 
-def _adv_map(conn: duckdb.DuckDBPyConnection, as_of: dt.date, cfg: Config) -> dict[str, float]:
+def _adv_map(
+    conn: duckdb.DuckDBPyConnection, as_of: dt.date, cfg: Config, _cache: dict | None = None
+) -> dict[str, float]:
     """ticker -> average daily DOLLAR volume from the liquid screen as of `as_of` (for cost impact)."""
-    scr = universe.screening_universe(conn, as_of, cfg)
+    scr = universe.screening_universe(conn, as_of, cfg, _cache=_cache)
     if scr.empty:
         return {}
     return scr.set_index("ticker")["avg_dollar_volume"].to_dict()
@@ -100,6 +102,7 @@ def _target_weights(
     portfolio_value: float,
     cfg: Config,
     survivorship: bool = False,
+    _cache: dict | None = None,
 ) -> pd.Series:
     """Target weights at `as_of` for the chosen fixed strategy (empty Series if none investable).
 
@@ -124,7 +127,7 @@ def _target_weights(
         if strategy in ("hrp", "risk_parity", "inverse_variance"):
             res = portfolio.construct_portfolio(
                 conn, as_of, tickers=basket, method=strategy, cfg=cfg,
-                portfolio_value=portfolio_value,
+                portfolio_value=portfolio_value, _cache=_cache,
             )
             if res.weights is None or len(res.weights) == 0:
                 return pd.Series(dtype="float64")
@@ -135,13 +138,13 @@ def _target_weights(
 
     if strategy in ("hrp", "risk_parity", "inverse_variance"):
         res = portfolio.construct_portfolio(
-            conn, as_of, method=strategy, cfg=cfg, portfolio_value=portfolio_value
+            conn, as_of, method=strategy, cfg=cfg, portfolio_value=portfolio_value, _cache=_cache
         )
         if res.weights is None or len(res.weights) == 0:
             return pd.Series(dtype="float64")
         return res.weights.astype("float64")
     if strategy in ("composite", "equal_weight"):
-        prof = factors.factor_profile(conn, as_of, cfg)
+        prof = factors.factor_profile(conn, as_of, cfg, _cache=_cache)
         if prof.empty:
             return pd.Series(dtype="float64")
         chosen = prof if strategy == "equal_weight" else prof.head(cfg.portfolio.default_top_n)
@@ -179,6 +182,7 @@ def _walk(
     cfg: Config,
     bt: BacktestConfig,
     survivorship: bool = False,
+    _cache: dict | None = None,
 ) -> _Walk:
     """Run one strategy over `rdates`, returning the net/gross return path, costs, and diagnostics."""
     units: dict[str, float] = {}     # ticker -> shares of the adjusted-price series
@@ -222,7 +226,7 @@ def _walk(
             break
 
         # --- 3. Choose target weights using only data <= d ---
-        w = _target_weights(conn, d, strategy, V, cfg, survivorship)
+        w = _target_weights(conn, d, strategy, V, cfg, survivorship, _cache=_cache)
         if len(w) == 0:
             out.empty_periods += 1
         held_names = [str(t) for t in w.index if float(w.get(t, 0.0)) > 0.0]
@@ -232,7 +236,7 @@ def _walk(
         # --- 4. Price the union of held + target names at d (to size trades in shares) ---
         target_names = [str(t) for t in w.index]
         px = _close_on(conn, d, list(set(cur_value) | set(target_names)))
-        adv = _adv_map(conn, d, cfg)
+        adv = _adv_map(conn, d, cfg, _cache=_cache)
         target_value = {t: float(w.get(t, 0.0)) * V for t in set(cur_value) | set(target_names)}
 
         # --- 5. Trades -> transaction cost + tax on realized gains; update cost basis ---
@@ -323,6 +327,8 @@ def run_backtest(
     cfg: Config = config,
     bt: BacktestConfig | None = None,
     lane: str = "free",
+    with_benchmark: bool = True,
+    _cache: dict | None = None,
 ) -> BacktestResult:
     """Run a walk-forward, net-of-cost backtest of `strategy` over [start, end], vs an equal-weight benchmark.
 
@@ -335,6 +341,7 @@ def run_backtest(
     """
     bt = bt or cfg.backtest
     strategy = strategy.lower()
+    cache = _cache if _cache is not None else {}   # run-scoped memo (PIT views by date); perf only
     ppy, rdates = _rebalance_dates(start, end, bt.rebalance)
     rf = bt.risk_free_annual / ppy
     survivorship = lane == "simfin"
@@ -372,7 +379,7 @@ def run_backtest(
             f"need at least two {bt.rebalance} rebalance dates in [{start}, {end}]; got {len(rdates)}"
         )
 
-    strat = _walk(conn, rdates, strategy, cfg, bt, survivorship)
+    strat = _walk(conn, rdates, strategy, cfg, bt, survivorship, _cache=cache)
 
     notes: list[str] = []
     if strat.empty_periods:
@@ -449,8 +456,8 @@ def run_backtest(
     # the strategy IS the benchmark (would be a tautology).
     bench_label = ""
     bench_cagr = bench_vol = bench_sharpe = bench_mdd = excess = float("nan")
-    if strategy != BENCHMARK:
-        bench = _walk(conn, rdates, BENCHMARK, cfg, bt, survivorship)
+    if strategy != BENCHMARK and with_benchmark:
+        bench = _walk(conn, rdates, BENCHMARK, cfg, bt, survivorship, _cache=cache)
         if bench.net_rets:
             bench_label = "equal-weight 1/N investable universe, net of same costs"
             bench_cagr = metrics.cagr(bench.net_rets, ppy)
@@ -537,12 +544,17 @@ def compare_backtests(
     stamp = SURVIVORSHIP_STAMP if lane == "simfin" else INDICATIVE_STAMP
     notes: list[str] = []
 
-    # 1. Run every strategy and collect its in-sample per-period Sharpe / skew / kurtosis.
+    # 1. Run every strategy and collect its in-sample per-period Sharpe / skew / kurtosis. One
+    #    shared run-scoped cache is reused across strategies (they recompute the SAME point-in-time
+    #    universe / factor profile / basket covariance at each date), and the per-strategy benchmark
+    #    is skipped -- compare ranks the strategies themselves, it never reads the 1/N benchmark.
+    cache: dict = {}
     runs: dict[str, BacktestResult] = {}
     is_pp_sharpes: dict[str, float] = {}
     is_moments: dict[str, tuple[int, float, float]] = {}   # strategy -> (n_is, skew, kurt)
     for s in strategies:
-        res = run_backtest(conn, start, end, strategy=s, cfg=cfg, bt=bt, lane=lane)
+        res = run_backtest(conn, start, end, strategy=s, cfg=cfg, bt=bt, lane=lane,
+                           with_benchmark=False, _cache=cache)
         runs[s] = res
         is_rets, _ = _split_returns(res, lock)
         is_pp_sharpes[s] = _per_period_sharpe(metrics.sharpe(is_rets, ppy, rf)[0], ppy)

@@ -516,6 +516,43 @@ def test_compare_selects_on_in_sample_dsr_and_scores_oos_once(tmp_path):
     assert "locked out-of-sample tail" in out
 
 
+def test_with_benchmark_false_skips_benchmark_but_keeps_strategy_stats(tmp_path):
+    c, cfg = _rng_world(tmp_path)
+    try:
+        full = bt.run_backtest(c, dt.date(2024, 1, 15), dt.date(2024, 4, 30),
+                               strategy="hrp", cfg=cfg, bt=ZERO_COST)
+        nobench = bt.run_backtest(c, dt.date(2024, 1, 15), dt.date(2024, 4, 30),
+                                  strategy="hrp", cfg=cfg, bt=ZERO_COST, with_benchmark=False)
+    finally:
+        c.close()
+    assert nobench.benchmark_label == ""                  # benchmark walk skipped
+    assert np.isnan(nobench.bench_cagr_net)
+    assert nobench.final_nav == pytest.approx(full.final_nav)   # the strategy path is identical
+    assert nobench.cagr_net == pytest.approx(full.cagr_net)
+
+
+def test_shared_cache_across_strategies_is_lossless(tmp_path):
+    # The run-scoped cache that compare_backtests shares across strategies must not change ANY
+    # result vs running each strategy with its own fresh cache (it only memoizes PIT views by date).
+    c, cfg = _rng_world(tmp_path)
+    shared: dict = {}
+    try:
+        a_shared = bt.run_backtest(c, dt.date(2024, 1, 15), dt.date(2024, 4, 30),
+                                   strategy="hrp", cfg=cfg, bt=ZERO_COST, _cache=shared)
+        b_shared = bt.run_backtest(c, dt.date(2024, 1, 15), dt.date(2024, 4, 30),
+                                   strategy="risk_parity", cfg=cfg, bt=ZERO_COST, _cache=shared)
+        a_fresh = bt.run_backtest(c, dt.date(2024, 1, 15), dt.date(2024, 4, 30),
+                                  strategy="hrp", cfg=cfg, bt=ZERO_COST)
+        b_fresh = bt.run_backtest(c, dt.date(2024, 1, 15), dt.date(2024, 4, 30),
+                                  strategy="risk_parity", cfg=cfg, bt=ZERO_COST)
+    finally:
+        c.close()
+    assert a_shared.final_nav == pytest.approx(a_fresh.final_nav)
+    assert b_shared.final_nav == pytest.approx(b_fresh.final_nav)
+    assert a_shared.cagr_net == pytest.approx(a_fresh.cagr_net)
+    assert b_shared.cagr_net == pytest.approx(b_fresh.cagr_net)
+
+
 def test_compare_deflates_more_with_more_trials(tmp_path):
     # The SAME strategy's DSR inside a 4-way race is <= its DSR run alone: multiple testing is
     # actually penalized (a higher expected best-of-N benchmark to clear).

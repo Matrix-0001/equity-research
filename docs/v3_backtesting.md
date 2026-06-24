@@ -209,9 +209,29 @@ nearest flow duration is >40% off the period target the field reads "Not estimat
 overstating it (latent; annual reads, which valuation/flags/factors use, are unchanged); (2) the
 reverse-DCF read now carries an explicit **indicative-not-fair-value caveat**, strengthened when a firm
 carries material leverage (liabilities > 60% of assets), since the model equates FCF to equity value.
-Remaining known items (perf/edge, not correctness): HRP O(n^3) on large baskets; compare re-runs the
-benchmark per strategy; a holding gone >staleness-window stale is marked to its last price by the
-engine but a name absent for >400 calendar days would mark to 0 (near-unreachable).
+Remaining known items (perf/edge, not correctness): HRP O(n^3) on large baskets; a holding gone
+>staleness-window stale is marked to its last price by the engine but a name absent for >400 calendar
+days would mark to 0 (near-unreachable).
+
+### Engine perf pass (2026-06-24): run-scoped memoization + benchmark skip in compare
+
+A backtest re-derives the SAME point-in-time views many times (the screening universe, factor profile,
+and the chosen basket's covariance, each requested more than once per rebalance; and compare runs N
+strategies over identical dates). Added `_cache.py` -- a plain run-scoped dict, created at the top of
+`run_backtest` / `compare_backtests` and threaded (default None = off, so every existing caller/test is
+unchanged) through `screening_universe`, `factor_profile`, `estimate_covariance`, and `sectors_for`,
+keyed by date + config (+ ticker-set for covariance). It memoizes only PIT-deterministic views, so it
+is **numerically lossless** (the hand-computed exact-NAV tests still pass) and is discarded when the run
+ends (no global staleness). `compare_backtests` now shares ONE cache across strategies (the three risk
+methods reuse the first's basket covariance) and runs each strategy with `with_benchmark=False` (compare
+ranks the strategies, it never reads the 1/N benchmark). Measured on the local 57-name set, 2018-2025
+monthly: **compare 90s -> 35s (2.5x)**; the test suite 33s -> 16s. A single hrp run is ~unchanged (~25s)
+-- its cost is the genuinely per-date covariance + HRP construction, not redundancy. **Scaling to the
+full S&P 500 (~500 names) is the NEXT perf step** and is algorithmic, not caching: the HRP single-linkage
+is O(n^3) and the dense covariance is O(n^2) per rebalance, so 500 names is ~hundreds of times the
+clustering work. Plan: cap the *construction* universe to the names that can actually hold weight under
+the position cap (a 10% cap means at most ~10 names matter, so clustering 500 is wasteful), and/or
+precompute standard runs + background custom runs in the UI layer rather than computing synchronously.
 
 ---
 
@@ -224,7 +244,7 @@ engine but a name absent for >400 calendar days would mark to 0 (near-unreachabl
 > (the v3 build spec — especially **§8 "Phase C — how to proceed"**).
 >
 > State of play: **v1 + v2 + v3 Phase A, B & C are COMPLETE** (Phase C committed when you ask) on GitHub
-> `Matrix-0001/equity-research` (`main`); **165/165 tests pass** (`.venv\Scripts\python -m pytest -q`).
+> `Matrix-0001/equity-research` (`main`); **167/167 tests pass** (`.venv\Scripts\python -m pytest -q`).
 > ALL data is FREE: EDGAR fundamentals + Yahoo prices (deep daily) + FRED/ALFRED macro; and for
 > survivorship-free backtests, **fja05680 point-in-time S&P 500 membership (MIT) + SimFin free delisted
 > prices (~2019+)**. Keys `FRED_API_KEY`, `FMP_API_KEY`, `SIMFIN_API_KEY` are in the local `.env`

@@ -27,6 +27,7 @@ import duckdb
 import pandas as pd
 
 from equity_research import universe
+from equity_research._cache import cache_get
 from equity_research.config import Config, config
 from equity_research.data import pit
 
@@ -95,9 +96,10 @@ def compute_raw_metrics(
     as_of: dt.date,
     cfg: Config = config,
     fcfg: FactorConfig = FactorConfig(),
+    _cache: dict | None = None,
 ) -> pd.DataFrame:
     """Raw (un-ranked) factor metrics for the liquid screening universe as of `as_of`."""
-    scr = universe.screening_universe(conn, as_of, cfg)
+    scr = universe.screening_universe(conn, as_of, cfg, _cache=_cache)
     if scr.empty:
         return pd.DataFrame()
     tickers = scr["ticker"].tolist()
@@ -139,15 +141,27 @@ def factor_profile(
     as_of: dt.date,
     cfg: Config = config,
     fcfg: FactorConfig = FactorConfig(),
+    _cache: dict | None = None,
 ) -> pd.DataFrame:
     """Per-ticker factor-group percentile ranks + composite, for the universe.
 
     Columns: the five factor groups (value/quality/profitability/momentum/low_vol),
     a `composite` (mean of available groups), `n_metrics` (how many of the seven raw
     metrics were computable — feeds the report's data-completeness/confidence), and
-    `market_cap`. Sorted by composite descending.
+    `market_cap`. Sorted by composite descending. `_cache` (run-scoped, optional) memoizes
+    the whole profile by `as_of` + config so repeated rebalances/strategies don't recompute it.
     """
-    raw = compute_raw_metrics(conn, as_of, cfg, fcfg)
+    return cache_get(
+        _cache, ("factors", as_of.isoformat(), id(cfg), id(fcfg)),
+        lambda: _factor_profile(conn, as_of, cfg, fcfg, _cache),
+    )
+
+
+def _factor_profile(
+    conn: duckdb.DuckDBPyConnection, as_of: dt.date, cfg: Config, fcfg: FactorConfig,
+    _cache: dict | None,
+) -> pd.DataFrame:
+    raw = compute_raw_metrics(conn, as_of, cfg, fcfg, _cache=_cache)
     if raw.empty:
         return raw
     ranks = percentile_ranks(raw)

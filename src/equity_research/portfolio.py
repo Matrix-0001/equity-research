@@ -29,6 +29,7 @@ import numpy as np
 import pandas as pd
 
 from equity_research import factors, universe
+from equity_research._cache import cache_get
 from equity_research.config import Config, config
 from equity_research.data import pit
 from equity_research.disclaimer import NOT_ESTIMATED, PERSISTENT_DISCLAIMER
@@ -77,6 +78,7 @@ def estimate_covariance(
     as_of: dt.date,
     tickers: list[str],
     cfg: Config = config,
+    _cache: dict | None = None,
 ) -> CovEstimate:
     """Annualized covariance/correlation from PIT daily returns over the kept names.
 
@@ -92,8 +94,18 @@ def estimate_covariance(
     The pairwise matrix is then projected to the nearest PSD matrix (a no-op for complete data),
     because risk_parity / HRP assume positive semi-definiteness. For names that all trade the full
     window (the free lane), this is identical to the old common-window estimate -- only the ragged
-    (delisted) case changes, and for the better.
+    (delisted) case changes, and for the better. `_cache` (run-scoped) memoizes the result by
+    `as_of` + ticker-set + config, so the three risk strategies that share a basket compute it once.
     """
+    return cache_get(
+        _cache, ("cov", as_of.isoformat(), tuple(sorted({t.upper() for t in tickers})), id(cfg)),
+        lambda: _estimate_covariance(conn, as_of, tickers, cfg),
+    )
+
+
+def _estimate_covariance(
+    conn: duckdb.DuckDBPyConnection, as_of: dt.date, tickers: list[str], cfg: Config
+) -> CovEstimate:
     pcfg = cfg.portfolio
     tickers = [t.upper() for t in dict.fromkeys(tickers)]  # de-dup, preserve order
     dropped: dict[str, str] = {}
@@ -534,6 +546,7 @@ def construct_portfolio(
     portfolio_value: float | None = None,
     mu: dict[str, float] | None = None,
     kelly_fraction: float | None = None,
+    _cache: dict | None = None,
 ) -> PortfolioResult:
     """Build portfolio weights for a basket via the chosen risk-based method (+ caps).
 
@@ -558,7 +571,7 @@ def construct_portfolio(
         names = list(mu.keys())  # Kelly is view-driven: the edge set IS the basket
         selection = "Kelly edge set (user-supplied)"
     else:
-        prof = factors.factor_profile(conn, as_of, cfg)
+        prof = factors.factor_profile(conn, as_of, cfg, _cache=_cache)
         if prof.empty:
             return PortfolioResult(
                 method, as_of, pv,
@@ -569,7 +582,7 @@ def construct_portfolio(
         selection = f"top {len(names)} by factor composite"
 
     # 2. Estimate point-in-time covariance (drops, never imputes).
-    ce = estimate_covariance(conn, as_of, names, cfg)
+    ce = estimate_covariance(conn, as_of, names, cfg, _cache=_cache)
     if not ce.tickers:
         return PortfolioResult(
             method, as_of, pv, dropped=ce.dropped, selection=selection,
@@ -633,7 +646,7 @@ def construct_portfolio(
     #    sector, liquidity) are then iterated to a JOINT fixpoint, so the final weights respect
     #    all three at once -- not just whichever was applied last (a single pass lets a later cap's
     #    redistribution push a name/sector back over an earlier cap).
-    sector_map = pit.sectors_for(conn, kept)
+    sector_map = pit.sectors_for(conn, kept, _cache=_cache)
     secs: list[str] | None = [sector_map.get(t, "Unknown") for t in kept] if sector_map else None
     if secs is None:
         notes.append("No sector data -> sector cap skipped (run pull-sectors to enable it).")
@@ -642,7 +655,7 @@ def construct_portfolio(
         if n_unknown:
             notes.append(f"{n_unknown} name(s) lack a SIC sector -> exempt from the sector cap")
 
-    scr = universe.screening_universe(conn, as_of, cfg)
+    scr = universe.screening_universe(conn, as_of, cfg, _cache=_cache)
     adv_map = scr.set_index("ticker")["avg_dollar_volume"].to_dict() if not scr.empty else {}
     adv = np.array([adv_map.get(t, np.nan) for t in kept])
     n_missing_adv = int(np.isnan(adv).sum())

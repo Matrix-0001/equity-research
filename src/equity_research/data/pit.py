@@ -129,12 +129,23 @@ def macro_asof(
 
 
 def sectors_for(
-    conn: duckdb.DuckDBPyConnection, tickers: list[str] | None = None
+    conn: duckdb.DuckDBPyConnection, tickers: list[str] | None = None,
+    _cache: dict | None = None,
 ) -> dict[str, str]:
     """ticker -> sector from the `securities` table. Empty dict if the table isn't loaded yet.
 
-    (Sector classification is current SIC, not point-in-time; see data/sectors.py.)
+    (Sector classification is current SIC, not point-in-time; see data/sectors.py.) `_cache`
+    (run-scoped, optional) memoizes by ticker-set so a backtest doesn't re-query it each rebalance.
     """
+    from equity_research._cache import cache_get
+
+    key = ("sectors", tuple(sorted(t.upper() for t in tickers)) if tickers else None)
+    return cache_get(_cache, key, lambda: _sectors_for(conn, tickers))
+
+
+def _sectors_for(
+    conn: duckdb.DuckDBPyConnection, tickers: list[str] | None
+) -> dict[str, str]:
     exists = conn.execute(
         "SELECT 1 FROM information_schema.tables WHERE table_name = 'securities'"
     ).fetchone()
