@@ -181,6 +181,54 @@ def security_info(
     return conn.execute(f"SELECT {select} FROM securities WHERE {where}", params).df()
 
 
+def company_profile(
+    conn: duckdb.DuckDBPyConnection, tickers: list[str] | None = None
+) -> pd.DataFrame:
+    """ticker -> company-profile metadata from `company_profile` (empty frame if not loaded).
+
+    Robust to the table being absent (returns an empty frame) or to column drift (a column the
+    table doesn't have yet comes back blank rather than erroring) -- same posture as `security_info`,
+    so the report degrades to "Not estimated" instead of crashing before a profile pull is run.
+    """
+    cols = ["ticker", "company", "exchanges", "state_of_incorp", "fiscal_year_end", "category",
+            "entity_type", "hq_city", "hq_state", "former_names", "first_filing_date"]
+    empty = pd.DataFrame(columns=cols)
+    exists = conn.execute(
+        "SELECT 1 FROM information_schema.tables WHERE table_name = 'company_profile'"
+    ).fetchone()
+    if not exists:
+        return empty
+    have = {r[0] for r in conn.execute(
+        "SELECT column_name FROM information_schema.columns WHERE table_name = 'company_profile'"
+    ).fetchall()}
+    select = ", ".join(c if c in have else f"'' AS {c}" for c in cols)
+    params: list = []
+    where = "1=1" + _in_filter([t.upper() for t in tickers] if tickers else None, params, "ticker")
+    return conn.execute(f"SELECT {select} FROM company_profile WHERE {where}", params).df()
+
+
+def recent_filings(
+    conn: duckdb.DuckDBPyConnection, ticker: str, n: int = 12
+) -> pd.DataFrame:
+    """Most recent SEC filings for `ticker` from `company_filings` (empty frame if not loaded).
+
+    Robust to the table being absent (returns empty), so the News section degrades to "run
+    pull-profiles" rather than crashing before the filings have been pulled.
+    """
+    cols = ["filed_date", "form", "description", "url"]
+    empty = pd.DataFrame(columns=cols)
+    exists = conn.execute(
+        "SELECT 1 FROM information_schema.tables WHERE table_name = 'company_filings'"
+    ).fetchone()
+    if not exists:
+        return empty
+    return conn.execute(
+        "SELECT filed_date, form, description, url FROM company_filings "
+        "WHERE ticker = ? ORDER BY filed_date DESC, accession DESC LIMIT ?",
+        [ticker.upper(), int(n)],
+    ).df()
+
+
 def macro_series_asof(
     conn: duckdb.DuckDBPyConnection,
     as_of: dt.date,

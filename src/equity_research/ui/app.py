@@ -24,10 +24,10 @@ import pandas as pd
 import plotly.express as px
 from dash import Dash, Input, Output, State, ctx, dash_table, dcc, html, no_update
 
-from equity_research import backtest, factors, portfolio, report
+from equity_research import backtest, factors, news, portfolio, report, statements
 from equity_research.config import BacktestConfig, config
 from equity_research.data import pit
-from equity_research.disclaimer import PERSISTENT_DISCLAIMER
+from equity_research.disclaimer import NOT_ESTIMATED, PERSISTENT_DISCLAIMER
 from equity_research.ui.jobs import ERROR, MANAGER
 
 _GROUPS = list(factors.FACTOR_GROUPS)               # value/quality/profitability/momentum/low_vol/size
@@ -150,18 +150,14 @@ def _select_rows(data: list[dict] | None, selected: dict | None) -> tuple[list[d
                   f"to list just those companies here.")
 
 
-def _report_card(ticker: str | None):
-    """The full SecurityReport for one ticker as HTML (computed figures only; no LLM narrative)."""
-    if not ticker:
-        return html.Div("Pick a company above, or click a dot on the chart, to see its full report.",
-                        style={"color": "#888", "fontSize": "13px"})
-    c = _ro_conn()
-    try:
-        rep = report.build_security_report(c, dt.date.today(), ticker, config, use_llm=False)
-    finally:
-        c.close()
+def _report_block(rep):
+    """The SecurityReport (computed figures only; no LLM) as a 'Research report' card.
+
+    Takes a prebuilt report (the unified Company view builds it once alongside statements) and omits
+    the company title -- the page header already shows the name.
+    """
     label_st = {"color": "#666", "fontSize": "12px", "padding": "5px 12px 5px 0",
-                "verticalAlign": "top", "textAlign": "left", "width": "120px"}
+                "verticalAlign": "top", "textAlign": "left", "width": "130px"}
     val_st = {"fontSize": "13px", "padding": "5px 0", "textAlign": "left"}
     rows = [
         ("Confidence", rep.confidence_tier),
@@ -178,10 +174,12 @@ def _report_card(ticker: str | None):
          for lbl, val in rows],
         style={"width": "100%", "borderCollapse": "collapse"},
     )
-    return html.Div([
-        html.H3(f"{rep.ticker} - {rep.company}", style={"margin": "0 0 8px"}),
+    return html.Div(style=_CARD, children=[
+        html.Div("Research report", style={"fontSize": "14px", "fontWeight": "600",
+                                           "marginBottom": "6px"}),
         table,
-        html.Div("Bull/bear narrative needs the optional LLM (off here); every figure above is "
+        html.Div("Within-universe percentile ranks + computed valuation/flags -- NOT predictions. "
+                 "Bull/bear narrative needs the optional LLM (off here); every figure above is "
                  f"computed. {PERSISTENT_DISCLAIMER}", style={**_NOTE, "marginTop": "8px"}),
     ])
 
@@ -413,6 +411,202 @@ def _run_compare_thunk(strategies, start, end, rebalance, lane, lock):
 
 
 # --------------------------------------------------------------------------- #
+# Company tab -- as-reported financial statements + SEC metadata (free/shareable)
+# --------------------------------------------------------------------------- #
+def _fmt_fye(mmdd: str) -> str:
+    """Format a SEC fiscalYearEnd 'MMDD' as 'Mon DD' (blank stays blank -> renders 'Not estimated')."""
+    s = str(mmdd or "").strip()
+    if len(s) != 4 or not s.isdigit():
+        return s
+    months = ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
+    mm, dd = int(s[:2]), int(s[2:])
+    return f"{months[mm - 1]} {dd}" if 1 <= mm <= 12 else s
+
+
+def _meta(label: str, value) -> "html.Div":
+    """One metadata cell: the value, or a muted 'Not estimated' when absent (never blank/fabricated)."""
+    val = str(value).strip() if value not in (None, "") else ""
+    shown = val if val else NOT_ESTIMATED
+    return html.Div([
+        html.Div(label, style={"fontSize": "11px", "color": "#888"}),
+        html.Div(shown, style={"fontSize": "13px", "color": "#222" if val else "#aaa"}),
+    ], style={"minWidth": "150px", "marginRight": "22px", "marginBottom": "10px"})
+
+
+def _statement_payload(rows, periods):
+    """(columns, data) for one statement's DataTable. Pure -> unit-tested. Cells already formatted
+    ('Not estimated' where the tag was absent), so the UI never shows a fabricated 0."""
+    cols = [{"name": "Line item", "id": "item"}]
+    cols += [{"name": str(p.year), "id": f"y{i}"} for i, p in enumerate(periods)]
+    data = []
+    for label, unit, vals in rows:
+        d = {"item": label}
+        for i, v in enumerate(vals):
+            d[f"y{i}"] = statements.fmt_value(v, unit)
+        data.append(d)
+    return cols, data
+
+
+def _statement_block(name, rows, periods):
+    cols, data = _statement_payload(rows, periods)
+    mute = [{"if": {"filter_query": f"{{{c['id']}}} = '{NOT_ESTIMATED}'", "column_id": c["id"]},
+             "color": "#bbb"} for c in cols if c["id"] != "item"]
+    return html.Div(style=_CARD, children=[
+        html.Div(name, style={"fontSize": "14px", "fontWeight": "600", "marginBottom": "6px"}),
+        dash_table.DataTable(
+            columns=cols, data=data,
+            style_cell={"fontFamily": "monospace", "fontSize": "12px", "padding": "4px 10px",
+                        "textAlign": "right"},
+            style_cell_conditional=[{"if": {"column_id": "item"}, "textAlign": "left",
+                                     "minWidth": "210px", "fontFamily": "system-ui"}],
+            style_header={"fontWeight": "bold", "backgroundColor": "#f5f5f5"},
+            style_data_conditional=mute,
+        ),
+    ])
+
+
+def _company_header(fs, prof_row: dict, info_row: dict):
+    """Header card: company name + SEC metadata. Honest about EDGAR's limits (no founding date)."""
+    company = (str(info_row.get("company") or "").strip() or str(prof_row.get("company") or "").strip()
+               or fs.company or "")
+    sector = str(info_row.get("sector") or "").strip()
+    hq_city, hq_state = str(prof_row.get("hq_city") or "").strip(), str(prof_row.get("hq_state") or "").strip()
+    hq = ", ".join(x for x in (hq_city.title(), hq_state) if x)
+    first_filing = str(prof_row.get("first_filing_date") or "").strip()
+    former = str(prof_row.get("former_names") or "").strip()
+    return html.Div(style=_CARD, children=[
+        html.H2(f"{fs.ticker}" + (f" - {company}" if company else ""),
+                style={"margin": "0 0 10px"}),
+        html.Div(style={"display": "flex", "flexWrap": "wrap"}, children=[
+            _meta("Sector", sector),
+            _meta("Exchange", prof_row.get("exchanges")),
+            _meta("Incorporated in", prof_row.get("state_of_incorp")),
+            _meta("Fiscal year end", _fmt_fye(prof_row.get("fiscal_year_end"))),
+            _meta("Headquarters", hq),
+            _meta("Entity type", prof_row.get("entity_type")),
+        ]),
+        html.Div(style={"display": "flex", "flexWrap": "wrap", "alignItems": "flex-end"}, children=[
+            _meta("Earliest SEC filing on record", first_filing),
+            html.Div("(lower bound from the SEC 'recent' filing index, NOT a founding date)",
+                     style={**_NOTE, "marginBottom": "12px"}),
+        ]),
+        (_meta("Former names", former) if former else html.Span()),
+        html.Div("Founding date and a business description are not in EDGAR's structured data, so "
+                 "they read 'Not estimated' here (a later phase adds the 10-K business text). "
+                 "Metadata source: SEC submissions (current, not point-in-time).",
+                 style={**_NOTE, "marginTop": "4px"}),
+    ])
+
+
+def _filings_block(filings_df):
+    """Recent SEC filings as 'news' -- a freely-shareable primary source. Pure -> unit-tested."""
+    rows = (filings_df.to_dict("records")
+            if filings_df is not None and not filings_df.empty else [])
+    if not rows:
+        body = html.Div("No filings loaded for this name -- run `pull-profiles` to fetch them.",
+                        style=_NOTE)
+    else:
+        body = html.Table([
+            html.Tr([
+                html.Td(str(r.get("filed_date", "")),
+                        style={"fontSize": "12px", "color": "#555", "padding": "3px 14px 3px 0",
+                               "whiteSpace": "nowrap", "verticalAlign": "top"}),
+                html.Td(str(r.get("form", "")),
+                        style={"fontSize": "12px", "fontWeight": "600", "padding": "3px 14px 3px 0",
+                               "whiteSpace": "nowrap", "verticalAlign": "top"}),
+                html.Td(html.A(str(r.get("description") or "View filing"),
+                               href=str(r.get("url", "")), target="_blank",
+                               style={"fontSize": "12px"}), style={"padding": "3px 0"}),
+            ]) for r in rows
+        ], style={"width": "100%", "borderCollapse": "collapse"})
+    return html.Div(style=_CARD, children=[
+        html.Div("Recent SEC filings", style={"fontSize": "14px", "fontWeight": "600",
+                                              "marginBottom": "6px"}),
+        body,
+        html.Div("Source: SEC EDGAR (primary source, freely shareable). 8-K = material event, "
+                 "10-K / 10-Q = annual / quarterly report, 4 = insider transaction.",
+                 style={**_NOTE, "marginTop": "6px"}),
+    ])
+
+
+def _media_block(items, error: bool = False):
+    """Media headlines (the PRIVATE half): headline + outlet + date + link only. Pure -> tested."""
+    if error:
+        body = html.Div("Headlines unavailable right now (news source/network error). The SEC "
+                        "filings above are unaffected.", style=_NOTE)
+    elif not items:
+        body = html.Div("No recent headlines found.", style=_NOTE)
+    else:
+        body = html.Div([
+            html.Div([
+                html.A(str(it.get("title", "")), href=str(it.get("url", "")), target="_blank",
+                       style={"fontSize": "13px"}),
+                html.Div(" - ".join(x for x in (str(it.get("source", "")),
+                                                str(it.get("published", ""))) if x),
+                         style={"fontSize": "11px", "color": "#888"}),
+            ], style={"marginBottom": "9px"}) for it in items
+        ])
+    return html.Div(style=_CARD, children=[
+        html.Div("Media headlines", style={"fontSize": "14px", "fontWeight": "600",
+                                           "marginBottom": "6px"}),
+        body,
+        html.Div("Source: Google News (headlines + links only; article text not reproduced, never "
+                 "LLM-written). Third-party media -> for PERSONAL use; keep private / behind auth "
+                 "when sharing. Not investment advice.", style={**_NOTE, "marginTop": "6px"}),
+    ])
+
+
+def _company_section(ticker: str | None):
+    """The unified company page (Yahoo-style): header -> research report -> financials -> news.
+
+    One search-driven view. Everything is computed/as-reported and carries the honesty chrome; a
+    missing figure reads 'Not estimated', never a fabricated value.
+    """
+    if not ticker:
+        return html.Div("Search a company / ticker above (or click a dot on the Screen tab) to see "
+                        "its report, financials, and news.",
+                        style={"color": "#888", "fontSize": "13px", "padding": "8px 2px"})
+    c = _ro_conn()
+    try:
+        fs = statements.financial_statements(c, dt.date.today(), ticker, n_years=4, cfg=config)
+        prof = pit.company_profile(c, [ticker.upper()])
+        info = pit.security_info(c, [ticker.upper()])
+        rep = report.build_security_report(c, dt.date.today(), ticker, config, use_llm=False)
+        filings = pit.recent_filings(c, ticker, 12)
+    finally:
+        c.close()
+    prof_row = prof.iloc[0].to_dict() if not prof.empty else {}
+    info_row = info.iloc[0].to_dict() if not info.empty else {}
+
+    children = [_company_header(fs, prof_row, info_row), _report_block(rep)]
+    if fs.is_empty():
+        children.append(html.Div(
+            f"No annual filings (10-K/20-F/40-F) on record for {fs.ticker} -- financial statements "
+            f"unavailable. Run `pull {fs.ticker}` to ingest EDGAR fundamentals.",
+            style={**_CARD, **_NOTE}))
+    else:
+        children += [_statement_block(name, rows, fs.periods) for name, rows in fs.sections]
+        children.append(html.Div(
+            "Financials are as-reported (SEC EDGAR companyfacts), point-in-time (filing date <= "
+            "today), USD in millions except per-share; most recent fiscal year first. Free cash "
+            f"flow is computed (OCF - capex). {PERSISTENT_DISCLAIMER}",
+            style={**_NOTE, "marginTop": "4px"}))
+    # News: BOTH the SEC filings (from the DB) and the live media headlines render inside this single
+    # company-body callback. (Keeping media in its own sibling node + callback meant a browser whose
+    # callback graph predated that node never applied it -- so media is built here, in the one render
+    # the page already drives.) The media fetch is short-timeout + cached + graceful, so a slow/failed
+    # news source degrades to an "unavailable" card rather than stalling the page.
+    children.append(html.H3("News", style={"margin": "16px 0 4px"}))
+    children.append(_filings_block(filings))
+    company_name = str(info_row.get("company") or "").strip() or fs.company or fs.ticker
+    try:
+        children.append(_media_block(news.fetch_headlines(company_name, n=8), error=False))
+    except Exception:
+        children.append(_media_block([], error=True))
+    return html.Div(children)
+
+
+# --------------------------------------------------------------------------- #
 # Layout
 # --------------------------------------------------------------------------- #
 def _screen_tab():
@@ -433,18 +627,13 @@ def _screen_tab():
                   dcc.Dropdown(id="sector", options=_sector_options(), multi=True,
                                placeholder="All sectors", style={"width": "280px"})]),
     ])
-    chart = html.Div(style={"flex": "1 1 58%", **_CARD}, children=[
+    chart = html.Div(style=_CARD, children=[
         dcc.Graph(id="scatter",
                   config={"displayModeBar": True, "modeBarButtonsToRemove": ["autoScale2d"]}),
         html.Div("Top names are labelled. Drag a box (or lasso) over dots to list just those in the "
-                 "table below; click a dot to load its report on the right; double-click to clear.",
+                 "table below; CLICK A DOT to open that company's full page (report + financials + "
+                 "news) on the Company tab; double-click to clear.",
                  style={**_NOTE, "marginTop": "4px"}),
-    ])
-    report_panel = html.Div(style={"flex": "1 1 40%", **_CARD}, children=[
-        html.H3("Full report", style={"marginTop": "0", "marginBottom": "6px"}),
-        dcc.Dropdown(id="report-ticker", options=_company_options(),
-                     placeholder="Search a company / ticker...", style={"marginBottom": "10px"}),
-        html.Div(id="report-card"),
     ])
     table = html.Div(style=_CARD, children=[dash_table.DataTable(
         id="table", columns=[{"name": c, "id": c} for c in ["rank", *_TABLE_COLS]],
@@ -464,8 +653,7 @@ def _screen_tab():
         controls,
         html.Div(id="summary", style={"fontSize": "13px", "color": "#444", "marginBottom": "8px"}),
         dcc.Store(id="screen-data"),
-        html.Div(style={"display": "flex", "gap": "14px", "alignItems": "flex-start"},
-                 children=[chart, report_panel]),
+        chart,
         table,
         html.Div("composite is completeness-shrunk toward the neutral 50th percentile by the "
                  "unmeasured factor fraction; missing inputs read 'Not estimated', never a fabricated "
@@ -579,6 +767,22 @@ def _backtest_tab():
     ])
 
 
+def _company_tab():
+    return html.Div([
+        html.Div(style=_CARD, children=[
+            html.Label("Company", style=_LBL),
+            dcc.Dropdown(id="company-ticker", options=_company_options(),
+                         placeholder="Search a company / ticker...",
+                         style={"maxWidth": "440px", "marginTop": "4px"}),
+            html.Div("A Yahoo-style overview from FREE, fully-shareable SEC EDGAR data: company "
+                     "metadata + as-reported Balance Sheet / Income / Cash Flow (point-in-time) + "
+                     "recent filings, plus live media headlines (personal use).",
+                     style={**_NOTE, "marginTop": "6px"}),
+        ]),
+        dcc.Loading(html.Div(id="company-body"), type="default"),
+    ])
+
+
 def build_app() -> Dash:
     app = Dash(__name__, suppress_callback_exceptions=True)   # tabs render one panel at a time
     app.title = "Equity Research - local"
@@ -591,8 +795,10 @@ def build_app() -> Dash:
                                                "marginBottom": "10px"}),
             html.Div("Research only - not investment advice - this tool makes no recommendations. "
                      "Ranks are within-universe percentiles, NOT predictions of return.", style=_BANNER),
+            dcc.Store(id="active-ticker"),   # selected company, shared across the Screen + Company tabs
             dcc.Tabs(id="tabs", value="screen", children=[
                 dcc.Tab(label="Screen", value="screen", children=[_screen_tab()]),
+                dcc.Tab(label="Company", value="company", children=[_company_tab()]),
                 dcc.Tab(label="Construct portfolio", value="construct", children=[_construct_tab()]),
                 dcc.Tab(label="Backtest", value="backtest", children=[_backtest_tab()]),
             ]),
@@ -633,17 +839,35 @@ def build_app() -> Dash:
         tips = [{"company": {"value": str(c), "type": "text"}} for c in df["company"]]
         return df[["rank", *_TABLE_COLS]].to_dict("records"), tips, note
 
-    @app.callback(Output("report-ticker", "value"), Input("scatter", "clickData"))
-    def _click_to_report(click):
+    # The unified Company page is driven by an APP-LEVEL store (always mounted), so both entry points
+    # -- the Company-tab picker and a click on the Screen scatter -- resolve to the same view.
+    @app.callback(
+        Output("company-body", "children"),
+        Input("active-ticker", "data"), Input("tabs", "value"),
+    )
+    def _render_company(ticker, tab):
+        # Also fire on tab change so RE-ENTERING the Company tab repaints from the stored ticker
+        # (dcc.Tabs unmounts inactive panels, so the body would otherwise come back blank).
+        if tab != "company":
+            return no_update
+        return _company_section(ticker)
+
+    @app.callback(Output("active-ticker", "data"), Input("company-ticker", "value"))
+    def _pick_company(ticker):
+        return ticker
+
+    @app.callback(
+        Output("active-ticker", "data", allow_duplicate=True),
+        Output("tabs", "value", allow_duplicate=True),
+        Input("scatter", "clickData"), prevent_initial_call=True,
+    )
+    def _scatter_to_company(click):
+        """Click a dot on the Screen tab -> open that company's full page on the Company tab."""
         if click and click.get("points"):
             tkr = click["points"][0].get("hovertext")
             if tkr:
-                return tkr
-        return no_update
-
-    @app.callback(Output("report-card", "children"), Input("report-ticker", "value"))
-    def _render_report(ticker):
-        return _report_card(ticker)
+                return tkr, "company"
+        return no_update, no_update
 
     @app.callback(
         Output("weights-fig", "figure"), Output("weights-table", "data"),

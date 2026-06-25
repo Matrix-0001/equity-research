@@ -21,10 +21,10 @@ from dataclasses import replace
 
 import pandas as pd
 
-from equity_research import backtest, exposures, factors, portfolio, report, universe
+from equity_research import backtest, exposures, factors, portfolio, report, statements, universe
 from equity_research.config import config
 from equity_research.data import (
-    edgar, fred, index_membership, pit, prices_free, reference, sectors, simfin, storage,
+    edgar, fred, index_membership, pit, prices_free, profile, reference, sectors, simfin, storage,
 )
 from equity_research.disclaimer import PERSISTENT_DISCLAIMER
 
@@ -299,6 +299,37 @@ def _report(ticker: str, asof: dt.date) -> None:
     print(rep.render())
 
 
+def _statements(ticker: str, asof: dt.date, years: int) -> None:
+    conn = storage.connect()
+    try:
+        fs = statements.financial_statements(conn, asof, ticker, n_years=years)
+    finally:
+        conn.close()
+    print(fs.render())
+
+
+def _pull_profiles(tickers: list[str]) -> None:
+    conn = storage.connect()
+    try:
+        if tickers:
+            names = [t.upper() for t in tickers]
+        elif storage.table_exists(conn, "fundamentals"):
+            names = sorted(r[0] for r in
+                           conn.execute("SELECT DISTINCT ticker FROM fundamentals").fetchall())
+        else:
+            names = []
+    finally:
+        conn.close()
+    if not names:
+        print("No tickers to profile. Pull some names first, or pass tickers explicitly.")
+        return
+    print(f"Fetching company profiles for {len(names)} ticker(s) from SEC submissions...\n")
+    s = profile.ingest_profiles(names)
+    print(f"Profiled {s['rows']} | resolved={len(s['tickers_resolved'])} "
+          f"missing_cik={len(s['tickers_missing_cik'])}")
+    print(f"\n{PERSISTENT_DISCLAIMER}")
+
+
 def _parse_edges(pairs: list[str] | None, path: str | None) -> dict[str, float]:
     """Build a ticker -> expected-excess-return dict from --edge pairs and/or a CSV file.
 
@@ -486,6 +517,19 @@ def main(argv: list[str] | None = None) -> None:
     report.add_argument("--asof", default=dt.date.today().isoformat(),
                         help="point-in-time date (YYYY-MM-DD); default today")
 
+    stm = sub.add_parser("statements",
+                         help="As-reported annual financial statements (SEC EDGAR, point-in-time)")
+    stm.add_argument("ticker", help="e.g. AAPL")
+    stm.add_argument("--asof", default=dt.date.today().isoformat(),
+                     help="point-in-time date (YYYY-MM-DD); default today")
+    stm.add_argument("--years", type=int, default=4, help="number of fiscal years to show (default 4)")
+
+    pp = sub.add_parser("pull-profiles",
+                        help="Fetch company metadata (exchange, incorporation, fiscal year, former "
+                             "names, first filing) from SEC submissions")
+    pp.add_argument("tickers", nargs="*",
+                    help="tickers to profile; omit to backfill all loaded names")
+
     cons = sub.add_parser(
         "construct",
         help="Build risk-based portfolio weights (inverse_variance / risk_parity / hrp) + caps",
@@ -624,6 +668,10 @@ def main(argv: list[str] | None = None) -> None:
                 args.min_cap, args.min_adv, args.min_price, args.min_complete, args.profile)
     elif args.cmd == "report":
         _report(args.ticker, dt.date.fromisoformat(args.asof))
+    elif args.cmd == "statements":
+        _statements(args.ticker, dt.date.fromisoformat(args.asof), args.years)
+    elif args.cmd == "pull-profiles":
+        _pull_profiles(args.tickers)
     elif args.cmd == "construct":
         _construct(args.tickers, dt.date.fromisoformat(args.asof),
                    args.method, args.top, args.value,

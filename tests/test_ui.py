@@ -13,8 +13,9 @@ from equity_research.disclaimer import (  # noqa: E402
     INDICATIVE_STAMP, BacktestCompare, BacktestResult,
 )
 from equity_research.ui.app import (  # noqa: E402
-    _GROUPS, _compare_figure, _compare_view, _nav_figure, _result_view, _ro_conn_for_lane,
-    _scatter_figure, _select_rows, _simfin_db_path, _slow_combo_warning, _stamp_banner,
+    _GROUPS, _company_header, _compare_figure, _compare_view, _filings_block, _fmt_fye, _media_block,
+    _meta, _nav_figure, _report_block, _result_view, _ro_conn_for_lane, _scatter_figure,
+    _select_rows, _simfin_db_path, _slow_combo_warning, _stamp_banner, _statement_payload,
     _weights_figure, build_app,
 )
 
@@ -49,7 +50,7 @@ def test_ui_app_builds_with_honesty_chrome():
     rendered = str(app.layout)
     assert "not investment advice" in rendered
     assert "Construct portfolio" in rendered
-    assert "Full report" in rendered
+    assert "Company" in rendered          # the unified Yahoo-style page (report + financials + news)
 
 
 def test_select_rows_follows_chart_selection():
@@ -160,6 +161,76 @@ def test_ro_conn_for_lane_simfin_missing_raises_clearly(monkeypatch, tmp_path):
     with pytest.raises(FileNotFoundError) as exc:
         _ro_conn_for_lane("simfin")
     assert "simfin" in str(exc.value) and "pull-simfin" in str(exc.value)
+
+
+# --------------------------------------------------------------------------- #
+# Company tab -- statement-table payload + metadata header builders.
+# --------------------------------------------------------------------------- #
+def test_statement_payload_columns_data_and_not_estimated():
+    periods = [dt.date(2024, 9, 30), dt.date(2023, 9, 30)]
+    rows = [("Revenue", "usd", [120e9, 100e9]),
+            ("Gross profit", "usd", [None, None]),          # missing tag
+            ("Diluted EPS", "per_share", [6.5, 6.0])]
+    cols, data = _statement_payload(rows, periods)
+    assert [c["name"] for c in cols] == ["Line item", "2024", "2023"]
+    assert data[0]["item"] == "Revenue" and data[0]["y0"] == "120,000"   # $ millions
+    assert data[1]["y0"] == "Not estimated" and data[1]["y1"] == "Not estimated"  # never "0"
+    assert data[2]["y0"] == "6.50"                                       # per-share
+
+
+def test_fmt_fye_formats_or_passes_through():
+    assert _fmt_fye("0927") == "Sep 27"
+    assert _fmt_fye("1231") == "Dec 31"
+    assert _fmt_fye("") == ""        # blank stays blank -> _meta renders 'Not estimated'
+
+
+def test_meta_shows_not_estimated_when_blank():
+    assert "Not estimated" in str(_meta("Sector", ""))
+    assert "Technology" in str(_meta("Sector", "Technology"))
+
+
+def test_filings_block_renders_rows_and_shareable_stamp():
+    import pandas as pd
+    df = pd.DataFrame([{"filed_date": "2026-05-01", "form": "8-K", "description": "Results",
+                        "url": "https://www.sec.gov/x"}])
+    rendered = str(_filings_block(df))
+    assert "Recent SEC filings" in rendered and "8-K" in rendered
+    assert "freely shareable" in rendered          # SEC filings are the shareable half
+    # Empty -> a clear "run pull-profiles" hint, never a fabricated filing.
+    assert "pull-profiles" in str(_filings_block(pd.DataFrame()))
+
+
+def test_media_block_states_and_private_stamp():
+    items = [{"title": "Apple unveils a chip", "source": "Reuters", "published": "Fri",
+              "url": "https://news/x"}]
+    ok = str(_media_block(items, error=False))
+    assert "Apple unveils a chip" in ok and "Reuters" in ok
+    assert "keep private" in ok.lower() or "PERSONAL use" in ok   # redistribution caveat
+    assert "unavailable" in str(_media_block([], error=True))     # graceful failure
+    assert "No recent headlines" in str(_media_block([], error=False))
+
+
+def test_report_block_renders_computed_rows_and_disclaimer():
+    from equity_research.disclaimer import SecurityReport
+    rep = SecurityReport(ticker="AAPL", company="Apple Inc.", confidence_tier="High",
+                         valuation_read="implied growth 13-18%/yr")
+    rendered = str(_report_block(rep))
+    assert "Research report" in rendered
+    assert "High" in rendered and "implied growth 13-18%/yr" in rendered
+    assert "Not estimated" in rendered          # unpopulated fields stay honest, never fabricated
+    assert "Not investment advice" in rendered
+
+
+def test_company_header_carries_name_metadata_and_honesty_caveats():
+    from equity_research.statements import FinancialStatements
+    fs = FinancialStatements("AAPL", "Apple Inc.", dt.date(2026, 1, 1))
+    prof = {"company": "Apple Inc.", "exchanges": "Nasdaq", "state_of_incorp": "CA",
+            "fiscal_year_end": "0927", "first_filing_date": "2015-05-29", "former_names": "",
+            "hq_city": "cupertino", "hq_state": "CA", "entity_type": "operating"}
+    rendered = str(_company_header(fs, prof, {"company": "Apple Inc.", "sector": "Technology"}))
+    assert "Apple Inc." in rendered and "Nasdaq" in rendered and "Sep 27" in rendered
+    assert "lower bound" in rendered                 # the "public since" honesty caveat
+    assert "not in EDGAR" in rendered                # founding/description honestly disclaimed
 
 
 def test_slow_combo_warning_only_fires_for_simfin_hrp_or_risk_parity():
