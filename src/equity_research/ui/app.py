@@ -23,10 +23,11 @@ from dash import Dash, Input, Output, dash_table, dcc, html
 
 from equity_research import factors
 from equity_research.config import config
+from equity_research.data import pit
 from equity_research.disclaimer import PERSISTENT_DISCLAIMER
 
 _GROUPS = list(factors.FACTOR_GROUPS)               # value/quality/profitability/momentum/low_vol/size
-_TABLE_COLS = ["ticker", "mcap_$B", *_GROUPS, "composite", "complete%", "n_metrics"]
+_TABLE_COLS = ["ticker", "company", "sector", "mcap_$B", *_GROUPS, "composite", "complete%"]
 
 
 def _ro_conn() -> duckdb.DuckDBPyConnection:
@@ -55,11 +56,16 @@ def _screen(profile: str, min_complete: float) -> pd.DataFrame:
     c = _ro_conn()
     try:
         prof = factors.factor_profile(c, dt.date.today(), config, profile=profile)
+        info = pit.security_info(c)                 # ticker -> company / sector
     finally:
         c.close()
     if prof.empty:
         return prof
     prof = prof.reset_index()  # ticker -> column
+    if not info.empty:
+        prof = prof.merge(info[["ticker", "company", "sector"]], on="ticker", how="left")
+    for col, default in (("company", ""), ("sector", "Unknown")):
+        prof[col] = prof[col].fillna(default) if col in prof.columns else default
     if min_complete:
         prof = prof[prof["completeness"] >= min_complete]
     prof["mcap_$B"] = (prof["market_cap"] / 1e9).round(2)
@@ -126,8 +132,13 @@ def build_app() -> Dash:
                     sort_action="native", filter_action="native", page_size=25,
                     style_cell={"fontFamily": "monospace", "fontSize": "12px", "padding": "4px 8px",
                                 "textAlign": "right"},
-                    style_cell_conditional=[{"if": {"column_id": "ticker"},
-                                             "textAlign": "left", "fontWeight": "bold"}],
+                    style_cell_conditional=[
+                        {"if": {"column_id": "ticker"}, "textAlign": "left", "fontWeight": "bold"},
+                        {"if": {"column_id": "company"}, "textAlign": "left", "maxWidth": "210px",
+                         "overflow": "hidden", "textOverflow": "ellipsis"},
+                        {"if": {"column_id": "sector"}, "textAlign": "left", "fontSize": "11px",
+                         "color": "#666"},
+                    ],
                     style_header={"fontWeight": "bold", "backgroundColor": "#f5f5f5"},
                     style_data_conditional=[
                         {"if": {"filter_query": "{complete%} < 100"}, "color": "#999"},  # sparse = muted
@@ -160,7 +171,8 @@ def build_app() -> Dash:
         fig = px.scatter(
             df, x="mcap_$B", y="composite", color="complete%",
             hover_name="ticker",
-            hover_data={g: True for g in _GROUPS} | {"mcap_$B": ":.2f", "complete%": False},
+            hover_data={"company": True, "sector": True, **{g: True for g in _GROUPS},
+                        "mcap_$B": ":.2f", "complete%": False},
             color_continuous_scale="Tealgrn", log_x=True,
             labels={"mcap_$B": "market cap ($B, log)", "composite": "composite rank"},
         )

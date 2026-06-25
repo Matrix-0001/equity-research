@@ -93,6 +93,10 @@ def ingest_sectors(
     """
     snapshot_date = snapshot_date or dt.date.today()
     cik_map = edgar.get_cik_map(cfg)
+    try:
+        names = edgar.get_company_names(cfg)            # ticker -> company name (one SEC request)
+    except Exception:
+        names = {}
 
     if skip_existing:
         conn0 = storage.connect(cfg)
@@ -119,7 +123,7 @@ def ingest_sectors(
             missing_cik.append(tu)            # transient SEC error -> skip this name, keep going
             time.sleep(_REQUEST_DELAY_S)
             continue
-        rows.append({"ticker": tu, "cik": int(cik), "sic": sic,
+        rows.append({"ticker": tu, "cik": int(cik), "company": names.get(tu, ""), "sic": sic,
                      "sic_description": desc, "sector": sic_to_sector(sic)})
         resolved.append(tu)
         time.sleep(_REQUEST_DELAY_S)

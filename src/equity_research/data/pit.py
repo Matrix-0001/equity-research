@@ -157,6 +157,30 @@ def _sectors_for(
     return {r[0]: r[1] for r in rows}
 
 
+def security_info(
+    conn: duckdb.DuckDBPyConnection, tickers: list[str] | None = None
+) -> pd.DataFrame:
+    """ticker -> company / sector / sic_description from `securities` (empty frame if not loaded).
+
+    Used to label tickers with a recognizable name + sector in the screen / UI. Columns that the
+    table doesn't have yet (e.g. `company` before a backfill) come back blank rather than erroring.
+    """
+    cols = ["ticker", "company", "sector", "sic_description"]
+    empty = pd.DataFrame(columns=cols)
+    exists = conn.execute(
+        "SELECT 1 FROM information_schema.tables WHERE table_name = 'securities'"
+    ).fetchone()
+    if not exists:
+        return empty
+    have = {r[0] for r in conn.execute(
+        "SELECT column_name FROM information_schema.columns WHERE table_name = 'securities'"
+    ).fetchall()}
+    select = ", ".join(c if c in have else f"'' AS {c}" for c in cols)
+    params: list = []
+    where = "1=1" + _in_filter([t.upper() for t in tickers] if tickers else None, params, "ticker")
+    return conn.execute(f"SELECT {select} FROM securities WHERE {where}", params).df()
+
+
 def macro_series_asof(
     conn: duckdb.DuckDBPyConnection,
     as_of: dt.date,

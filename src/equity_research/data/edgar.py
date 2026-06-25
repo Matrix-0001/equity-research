@@ -114,6 +114,16 @@ def get_cik_map(cfg: Config = config) -> dict[str, int]:
     return {row["ticker"].upper(): int(row["cik_str"]) for row in data.values()}
 
 
+def get_company_names(cfg: Config = config) -> dict[str, str]:
+    """Ticker (upper) -> company name, from the SEC's official `company_tickers.json` (`title`).
+
+    One request, covers every SEC filer (so the whole S&P 1500 universe), free/public -- used to label
+    tickers with a recognizable name in the screen / UI.
+    """
+    data = _get_json(_TICKER_MAP_URL, cfg)
+    return {row["ticker"].upper(): str(row.get("title") or "").strip() for row in data.values()}
+
+
 def fetch_company_facts(cik: int, cfg: Config = config) -> dict:
     url = f"https://data.sec.gov/api/xbrl/companyfacts/CIK{int(cik):010d}.json"
     return _get_json(url, cfg)
