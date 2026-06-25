@@ -15,16 +15,20 @@ from the CLI (`pull-universe`), not the UI. Run: `python -m equity_research.ui`.
 from __future__ import annotations
 
 import datetime as dt
+import os
+from dataclasses import replace
+from pathlib import Path
 
 import duckdb
 import pandas as pd
 import plotly.express as px
-from dash import Dash, Input, Output, dash_table, dcc, html, no_update
+from dash import Dash, Input, Output, State, ctx, dash_table, dcc, html, no_update
 
-from equity_research import factors, portfolio, report
-from equity_research.config import config
+from equity_research import backtest, factors, portfolio, report
+from equity_research.config import BacktestConfig, config
 from equity_research.data import pit
 from equity_research.disclaimer import PERSISTENT_DISCLAIMER
+from equity_research.ui.jobs import ERROR, MANAGER
 
 _GROUPS = list(factors.FACTOR_GROUPS)               # value/quality/profitability/momentum/low_vol/size
 _TABLE_COLS = ["ticker", "company", "sector", "mcap_$B", *_GROUPS, "composite", "complete%"]
@@ -246,6 +250,169 @@ def _construct_outputs(tickers, method, value):
 
 
 # --------------------------------------------------------------------------- #
+# Backtest tab -- background jobs (a run is ~25-35s, far too slow for a web request)
+# --------------------------------------------------------------------------- #
+_STAMP_OK = {"background": "#EAF6EE", "color": "#1E6B3A", "border": "1px solid #BFE3CC"}
+_STAMP_WARN = {"background": "#FBEAEA", "color": "#8A2326", "border": "1px solid #E8B7B7"}
+
+
+def _nav_figure(result):
+    """Net-of-cost NAV path for a single backtest (empty curve -> an honest empty frame, no fake line)."""
+    curve = list(getattr(result, "nav_curve", []) or [])
+    if not curve:
+        return px.line(title="No NAV path -- the universe was empty over this window (see notes)")
+    df = pd.DataFrame(curve, columns=["date", "nav"])
+    fig = px.line(df, x="date", y="nav", labels={"date": "", "nav": "NAV ($, net of costs)"})
+    fig.update_traces(line=dict(width=2))
+    fig.update_layout(height=320, margin=dict(l=10, r=10, t=10, b=10))
+    return fig
+
+
+def _compare_figure(compare):
+    """In-sample Deflated-Sharpe per strategy (the SELECTION metric), winner highlighted.
+
+    DSR (not raw Sharpe) is what `compare_backtests` selects on, so the chart shows exactly the
+    multiple-testing-corrected number used to pick -- never a naive best-Sharpe race.
+    """
+    rows = [r for r in getattr(compare, "rows", []) if pd.notna(r.get("dsr"))]
+    if not rows:
+        return px.bar(title="No deflated Sharpe to plot (insufficient in-sample data on every run)")
+    df = pd.DataFrame([
+        {"strategy": r["strategy"], "dsr%": round(float(r["dsr"]) * 100, 1),
+         "selected": r["strategy"] == getattr(compare, "selected", "")}
+        for r in rows
+    ]).sort_values("dsr%")
+    fig = px.bar(df, x="dsr%", y="strategy", orientation="h", color="selected",
+                 color_discrete_map={True: "#1E6B3A", False: "#9CC3AD"},
+                 labels={"dsr%": "in-sample Deflated Sharpe = P(true SR > best-of-N)  (%)",
+                         "strategy": ""})
+    fig.update_layout(height=max(240, 34 * len(df)), margin=dict(l=10, r=10, t=10, b=10),
+                      showlegend=False)
+    return fig
+
+
+def _stamp_banner(lane: str, valid: bool, stamp: str):
+    """The loud lane/validity stamp -- honesty chrome that must never be a footnote."""
+    style = _STAMP_OK if valid else _STAMP_WARN
+    text = "VALID (survivorship-free)" if valid else stamp
+    return html.Div(f"Data lane: {lane}   |   {text}",
+                    style={**style, "padding": "8px 14px", "borderRadius": "8px",
+                           "fontSize": "12px", "fontWeight": "600", "marginBottom": "10px"})
+
+
+def _render_block(text: str):
+    """The audited honest render() text verbatim (stamp, costs, ranges, regimes, lock, notes, disclaimer).
+
+    Rendering the dataclass's own render() means the UI cannot drop or soften any honesty content --
+    it shows exactly what the CLI shows, byte for byte.
+    """
+    return html.Pre(text, style={"fontFamily": "monospace", "fontSize": "12px",
+                                 "whiteSpace": "pre-wrap", "lineHeight": "1.45",
+                                 "background": "#FAFAFA", "border": "0.5px solid #eee",
+                                 "borderRadius": "8px", "padding": "12px 14px", "margin": "0",
+                                 "maxHeight": "560px", "overflowY": "auto"})
+
+
+def _result_view(result):
+    """Children for a completed single backtest: loud stamp + the full audited render() text."""
+    return [_stamp_banner(result.lane, result.valid, result.stamp), _render_block(result.render())]
+
+
+def _compare_view(compare):
+    """Children for a completed compare run: loud stamp + the full audited render() text."""
+    return [_stamp_banner(compare.lane, compare.valid, compare.stamp),
+            _render_block(compare.render())]
+
+
+# Methods whose construction cost is heavy on a large basket (HRP single-linkage is O(n^3); ERC is
+# iterative). On the free lane the basket is the top-N by composite (small), so this never bites; on
+# the simfin lane there is no composite to rank DELISTED names, so the basket is the whole ~500-name
+# index membership -- and a long monthly run of these can take many minutes.
+_SLOW_METHODS = ("hrp", "risk_parity")
+
+
+def _slow_combo_warning(lane, mode, strategy, strategies) -> str:
+    """A soft heads-up string for slow simfin combos (empty when the run will be quick). Pure/tested."""
+    if lane != "simfin":
+        return ""
+    chosen = list(strategies or []) if mode == "compare" else ([strategy] if strategy else [])
+    slow = sorted({s for s in chosen if s in _SLOW_METHODS})
+    if not slow:
+        return ""
+    return (f"Heads up: on the simfin lane there is no factor composite to rank delisted names, so "
+            f"{'/'.join(slow)} constructs over the FULL ~500-name index membership every rebalance "
+            f"(HRP clustering is O(n^3)) -- a long monthly run can take MANY MINUTES. equal_weight "
+            f"and inverse_variance keep all names and finish in seconds; or shorten the window / use "
+            f"quarterly rebalance.")
+
+
+def _bt_config(rebalance: str, lock: dt.date | None) -> BacktestConfig:
+    """A BacktestConfig with the UI-chosen cadence + optional locked-test boundary (rest = defaults)."""
+    return replace(config.backtest, rebalance=(rebalance or "monthly"), locked_test_start=lock)
+
+
+def _parse_date(value, default: dt.date | None = None) -> dt.date | None:
+    if not value:
+        return default
+    return dt.date.fromisoformat(str(value)[:10])
+
+
+def _simfin_db_path() -> Path:
+    """Where the survivorship-free (simfin) lane's DuckDB lives -- a SEPARATE dir from the free lane.
+
+    SimFin and Yahoo prices must never share a data dir (recycled tickers / source collisions), so
+    the simfin lane reads its own DB. Override with EQR_SIMFIN_DATA_DIR; the default is a
+    `data_simfin` sibling of the free lane's data dir (`pull-index-history` + `pull-simfin` target).
+    """
+    override = os.getenv("EQR_SIMFIN_DATA_DIR")
+    base = Path(override).resolve() if override else (config.data_dir.parent / "data_simfin")
+    return base / config.db_path.name
+
+
+def _ro_conn_for_lane(lane: str) -> duckdb.DuckDBPyConnection:
+    """Read-only connection for a backtest lane: free uses the main DB, simfin its own dir.
+
+    This lets ONE UI process serve both lanes: the Screen/Construct/free-backtest surfaces keep
+    reading the full free-lane DB (universe + fundamentals), while a simfin run transparently reads
+    the survivorship-free DB (PIT index membership + delisted prices). A missing simfin DB raises a
+    clear, actionable error (surfaced as the job's failure) rather than silently returning 0 names.
+    """
+    if lane == "simfin":
+        p = _simfin_db_path()
+        if not p.exists():
+            raise FileNotFoundError(
+                f"simfin lane has no data dir (looked for {p}). Build it once: set EQR_DATA_DIR to a "
+                f"dedicated dir, run 'pull-index-history' then 'pull-simfin', or point "
+                f"EQR_SIMFIN_DATA_DIR at an existing one."
+            )
+        return duckdb.connect(str(p), read_only=True)
+    return _ro_conn()
+
+
+def _run_single_thunk(strategy, start, end, rebalance, lane, lock):
+    """A zero-arg thunk the job worker runs; it opens its OWN read-only connection in that thread."""
+    def _thunk():
+        conn = _ro_conn_for_lane(lane)    # the engine only READS -> read-only is safe + concurrent
+        try:
+            return backtest.run_backtest(conn, start, end, strategy=strategy, cfg=config,
+                                         bt=_bt_config(rebalance, lock), lane=lane)
+        finally:
+            conn.close()
+    return _thunk
+
+
+def _run_compare_thunk(strategies, start, end, rebalance, lane, lock):
+    def _thunk():
+        conn = _ro_conn_for_lane(lane)
+        try:
+            return backtest.compare_backtests(conn, start, end, strategies, cfg=config,
+                                              bt=_bt_config(rebalance, lock), lane=lane)
+        finally:
+            conn.close()
+    return _thunk
+
+
+# --------------------------------------------------------------------------- #
 # Layout
 # --------------------------------------------------------------------------- #
 def _screen_tab():
@@ -350,6 +517,68 @@ def _construct_tab():
     ])
 
 
+def _backtest_tab():
+    strat_opts = [{"label": s, "value": s} for s in backtest.STRATEGIES]
+    today = dt.date.today()
+    controls = html.Div(style={"display": "flex", "gap": "18px", "flexWrap": "wrap",
+                               "alignItems": "flex-end", **_CARD}, children=[
+        html.Div([html.Label("Data lane", style=_LBL),
+                  dcc.Dropdown(id="bt-lane", clearable=False, value="free", style={"width": "230px"},
+                               options=[{"label": "free (Yahoo) -- INDICATIVE ONLY", "value": "free"},
+                                        {"label": "simfin -- survivorship-free", "value": "simfin"}])]),
+        html.Div([html.Label("Mode", style=_LBL),
+                  dcc.Dropdown(id="bt-mode", clearable=False, value="single", style={"width": "190px"},
+                               options=[{"label": "single strategy", "value": "single"},
+                                        {"label": "compare (Deflated Sharpe)", "value": "compare"}])]),
+        html.Div([html.Label("Strategy (single mode)", style=_LBL),
+                  dcc.Dropdown(id="bt-strategy", clearable=False, value="hrp",
+                               options=strat_opts, style={"width": "200px"})]),
+        html.Div([html.Label("Strategies (compare mode)", style=_LBL),
+                  dcc.Dropdown(id="bt-strategies", multi=True,
+                               value=["hrp", "risk_parity", "equal_weight"],
+                               options=strat_opts, style={"width": "320px"})]),
+        html.Div([html.Label("Window (start -> end)", style=_LBL), html.Br(),
+                  dcc.DatePickerRange(id="bt-dates", start_date=dt.date(2018, 1, 1).isoformat(),
+                                      end_date=today.isoformat(), display_format="YYYY-MM-DD")]),
+        html.Div([html.Label("Rebalance", style=_LBL),
+                  dcc.Dropdown(id="bt-rebalance", clearable=False, value="monthly",
+                               options=[{"label": "monthly", "value": "monthly"},
+                                        {"label": "quarterly", "value": "quarterly"}],
+                               style={"width": "140px"})]),
+        html.Div([html.Label("Locked-test start (optional)", style=_LBL), html.Br(),
+                  dcc.DatePickerSingle(id="bt-lock", placeholder="hold-out tail",
+                                       clearable=True, display_format="YYYY-MM-DD")]),
+        html.Div([html.Button("Run backtest", id="bt-run", n_clicks=0,
+                              style={"padding": "9px 18px", "fontSize": "13px", "fontWeight": "600",
+                                     "background": "#72243E", "color": "white", "border": "0",
+                                     "borderRadius": "8px", "cursor": "pointer"})]),
+    ])
+    return html.Div([
+        controls,
+        html.Div("A run is ~25-35s, so it is computed OFF the web thread (a background job) and this "
+                 "panel polls for the result -- the UI stays responsive. The free lane reads the main "
+                 "data dir; the simfin (survivorship-free) lane reads its own 'data_simfin' dir "
+                 "automatically (override: EQR_SIMFIN_DATA_DIR). If that dir is missing, the run fails "
+                 "with a clear message -- pull-index-history + pull-simfin build it.",
+                 style={**_NOTE, "marginBottom": "8px"}),
+        html.Div(id="bt-warn"),
+        dcc.Store(id="bt-job"),
+        dcc.Interval(id="bt-poll", interval=1500, disabled=True),
+        html.Div(id="bt-status", style={"fontSize": "13px", "margin": "4px 0 10px",
+                                        "minHeight": "20px"}),
+        html.Div(style=_CARD, children=[
+            html.Div("NAV path (single) / Deflated-Sharpe race (compare)",
+                     style={"fontSize": "13px", "fontWeight": "500", "marginBottom": "6px"}),
+            dcc.Graph(id="bt-nav", config={"displayModeBar": False},
+                      figure=px.line(title="Set the controls and click Run backtest"))]),
+        html.Div(id="bt-result", style=_CARD),
+        html.Div("Every run is net of costs, point-in-time, and carries its lane/validity stamp; the "
+                 "Sharpe is a range (+/- 1 SE), comparisons are deflated for multiple testing, and the "
+                 f"locked tail is scored once. {PERSISTENT_DISCLAIMER}",
+                 style={**_NOTE, "marginTop": "6px"}),
+    ])
+
+
 def build_app() -> Dash:
     app = Dash(__name__, suppress_callback_exceptions=True)   # tabs render one panel at a time
     app.title = "Equity Research - local"
@@ -365,6 +594,7 @@ def build_app() -> Dash:
             dcc.Tabs(id="tabs", value="screen", children=[
                 dcc.Tab(label="Screen", value="screen", children=[_screen_tab()]),
                 dcc.Tab(label="Construct portfolio", value="construct", children=[_construct_tab()]),
+                dcc.Tab(label="Backtest", value="backtest", children=[_backtest_tab()]),
             ]),
         ],
     )
@@ -422,6 +652,80 @@ def build_app() -> Dash:
     )
     def _update_construct(basket, method, value):
         return _construct_outputs(basket, method, value)
+
+    # Soft, non-blocking heads-up the moment a slow simfin combo is selected (before any run).
+    @app.callback(
+        Output("bt-warn", "children"),
+        Input("bt-lane", "value"), Input("bt-mode", "value"),
+        Input("bt-strategy", "value"), Input("bt-strategies", "value"),
+    )
+    def _backtest_warning(lane, mode, strategy, strategies):
+        msg = _slow_combo_warning(lane, mode, strategy, strategies)
+        if not msg:
+            return ""
+        return html.Div(msg, style={"background": "#FFF4E0", "color": "#8A5A00",
+                                    "border": "1px solid #F0D49B", "borderRadius": "8px",
+                                    "padding": "8px 14px", "fontSize": "12px",
+                                    "margin": "0 0 8px"})
+
+    # One callback drives the whole backtest tab: it is triggered both by the Run button (submit a
+    # background job) and by the polling Interval (check the job + render when done). Using
+    # callback_context to tell the two triggers apart keeps it to a single set of outputs -- no
+    # duplicate-output juggling.
+    @app.callback(
+        Output("bt-job", "data"), Output("bt-poll", "disabled"), Output("bt-status", "children"),
+        Output("bt-nav", "figure"), Output("bt-result", "children"),
+        Input("bt-run", "n_clicks"), Input("bt-poll", "n_intervals"),
+        State("bt-lane", "value"), State("bt-mode", "value"), State("bt-strategy", "value"),
+        State("bt-strategies", "value"), State("bt-dates", "start_date"),
+        State("bt-dates", "end_date"), State("bt-rebalance", "value"), State("bt-lock", "date"),
+        State("bt-job", "data"),
+        prevent_initial_call=True,
+    )
+    def _drive_backtest(n_clicks, n_intervals, lane, mode, strategy, strategies, start_date,
+                        end_date, rebalance, lock_date, job_data):
+        if ctx.triggered_id == "bt-run":
+            start, end = _parse_date(start_date), _parse_date(end_date)
+            if start is None or end is None:
+                return no_update, True, "Pick a start and end date first.", no_update, no_update
+            lock = _parse_date(lock_date)
+            if mode == "compare":
+                chosen = [s for s in (strategies or []) if s]
+                if len(chosen) < 2:
+                    return (no_update, True, "Compare mode needs at least 2 strategies.",
+                            no_update, no_update)
+                label = f"compare {'/'.join(chosen)} [{lane}] {start}->{end} {rebalance}"
+                jid = MANAGER.submit("compare", label,
+                                     _run_compare_thunk(chosen, start, end, rebalance, lane, lock))
+                kind = "compare"
+            else:
+                if not strategy:
+                    return no_update, True, "Pick a strategy first.", no_update, no_update
+                label = f"{strategy} [{lane}] {start}->{end} {rebalance}"
+                jid = MANAGER.submit("single", label,
+                                     _run_single_thunk(strategy, start, end, rebalance, lane, lock))
+                kind = "single"
+            running = html.Span(f"Running: {label} ... (~25-35s; off the web thread, UI stays live)",
+                                style={"color": "#8A6D1E"})
+            placeholder = px.line(title="Running -- the result will appear here when the job finishes")
+            return {"id": jid, "kind": kind}, False, running, placeholder, []
+
+        # --- polling tick ---
+        job = MANAGER.get((job_data or {}).get("id"))
+        if job is None:
+            return no_update, True, no_update, no_update, no_update
+        if not job.is_terminal():
+            status = html.Span(f"Running: {job.label} ... {job.elapsed():.0f}s elapsed",
+                               style={"color": "#8A6D1E"})
+            return no_update, False, status, no_update, no_update
+        if job.status == ERROR:
+            status = html.Span(f"Backtest failed: {job.error}", style={"color": "#8A2326"})
+            return no_update, True, status, px.line(title="Backtest failed -- see message above"), []
+        # job.status == DONE
+        status = html.Span(f"Done in {job.elapsed():.0f}s: {job.label}", style={"color": "#1E6B3A"})
+        if job.kind == "compare":
+            return no_update, True, status, _compare_figure(job.result), _compare_view(job.result)
+        return no_update, True, status, _nav_figure(job.result), _result_view(job.result)
 
     return app
 
