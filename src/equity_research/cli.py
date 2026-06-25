@@ -87,7 +87,8 @@ def _floor_cfg(min_cap: float | None, min_adv: float | None, min_price: float | 
 
 
 def _screen(asof: dt.date, top: int, min_cap: float | None = None,
-            min_adv: float | None = None, min_price: float | None = None) -> None:
+            min_adv: float | None = None, min_price: float | None = None,
+            min_complete: float | None = None) -> None:
     cfg = _floor_cfg(min_cap, min_adv, min_price)
     fl = cfg.universe_floor
     conn = storage.connect()
@@ -103,20 +104,28 @@ def _screen(asof: dt.date, top: int, min_cap: float | None = None,
         print("No data in the universe. Run `pull TICKERS...` or `pull-universe` first.")
         return
 
+    n_total = len(prof)
+    if min_complete is not None:
+        prof = prof[prof["completeness"] >= min_complete]
+
     disp = prof.copy()
     disp["mcap_$B"] = (disp["market_cap"] / 1e9).round(1)
+    disp["complete%"] = (disp["completeness"] * 100).round(0)
     rank_cols = ["value", "quality", "profitability", "momentum", "low_vol", "composite"]
     for c in rank_cols:
         disp[c] = disp[c].round(0)
-    cols = ["mcap_$B", *rank_cols, "n_metrics"]
+    cols = ["mcap_$B", *rank_cols, "complete%", "n_metrics"]
 
     print(f"Factor percentile ranks within universe (0-100, higher = more attractive) "
           f"| as of {asof}")
-    print(f"Universe: {len(disp)} names\n")
+    filt = (f" | shown: {len(prof)} with completeness >= {min_complete:.0%}"
+            if min_complete is not None else "")
+    print(f"Universe: {n_total} names{filt}\n")
     print(disp.head(top)[cols].to_string())
-    print("\nRanks are cross-sectional within THIS universe - not predictions, not buy "
-          "signals.\nGroups with missing inputs are averaged over available data only "
-          "(see n_metrics; 7 = all factors present).")
+    print("\nRanks are cross-sectional within THIS universe - not predictions, not buy signals.")
+    print("'composite' is shrunk toward neutral (50) by the fraction of UNMEASURED factor groups, so "
+          "a name\ncan't rank top on a partial profile (complete% = factor groups measured; missing "
+          "inputs stay 'Not estimated', never a fabricated 0). Filter with --min-complete.")
     print(f"\n{PERSISTENT_DISCLAIMER}")
 
 
@@ -460,6 +469,9 @@ def main(argv: list[str] | None = None) -> None:
                              f"${config.universe_floor.min_avg_dollar_volume_usd:,.0f})")
     screen.add_argument("--min-price", type=float, default=None,
                         help=f"min price override (default ${config.universe_floor.min_price_usd:.2f})")
+    screen.add_argument("--min-complete", type=float, default=None, metavar="FRAC",
+                        help="only show names measured on at least this fraction of the 5 factor "
+                             "groups (e.g. 0.8); filters out sparse-data names like banks/REITs")
 
     report = sub.add_parser("report", help="Per-ticker factor ranks + valuation + flags")
     report.add_argument("ticker", help="e.g. AAPL")
@@ -601,7 +613,7 @@ def main(argv: list[str] | None = None) -> None:
         _pull(args.tickers, dt.date.fromisoformat(args.asof))
     elif args.cmd == "screen":
         _screen(dt.date.fromisoformat(args.asof), args.top,
-                args.min_cap, args.min_adv, args.min_price)
+                args.min_cap, args.min_adv, args.min_price, args.min_complete)
     elif args.cmd == "report":
         _report(args.ticker, dt.date.fromisoformat(args.asof))
     elif args.cmd == "construct":

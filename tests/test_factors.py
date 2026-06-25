@@ -89,6 +89,53 @@ def test_composite_orders_universe(fundamental_conn):
 
 
 # --------------------------------------------------------------------------- #
+# Data-completeness: a sparse-data name can't rank top on a partial profile
+# --------------------------------------------------------------------------- #
+def test_completeness_shrinks_partial_data_composite(tmp_path):
+    # BANK is cheap (high book/market) but, like a real bank/REIT, reports no net income or gross
+    # profit -> no quality/profitability groups. The other names are fully measured. The composite
+    # must shrink BANK toward neutral (50) by its unmeasured fraction so it can't top the screen.
+    c = storage.connect(Config(data_dir=tmp_path))
+    storage.load_table(c, _flat_prices(["BANK", "GOOD", "F1", "F2", "F3"]), "prices")
+    fund = _annual([
+        # BANK: cheapest (equity 8e9 / mcap 1e10), but net_income & gross_profit MISSING.
+        {"ticker": "BANK", "net_income": np.nan, "total_equity": 8e9, "gross_profit": np.nan,
+         "total_assets": 1e10, "shares_outstanding": 1e9},
+        # GOOD: fully measured, strongest earnings (high quality + profitability).
+        {"ticker": "GOOD", "net_income": 3e9, "total_equity": 1e9, "gross_profit": 8e9,
+         "total_assets": 1e10, "shares_outstanding": 1e9},
+        {"ticker": "F1", "net_income": 1.0e9, "total_equity": 2e9, "gross_profit": 3e9,
+         "total_assets": 1e10, "shares_outstanding": 1e9},
+        {"ticker": "F2", "net_income": 0.5e9, "total_equity": 1.5e9, "gross_profit": 2e9,
+         "total_assets": 1e10, "shares_outstanding": 1e9},
+        {"ticker": "F3", "net_income": 0.2e9, "total_equity": 1e9, "gross_profit": 1e9,
+         "total_assets": 1e10, "shares_outstanding": 1e9},
+    ])
+    storage.load_table(c, fund, "fundamentals")
+    cfg = Config(data_dir="/unused")
+    try:
+        prof = factors.factor_profile(c, AS_OF, cfg)
+    finally:
+        c.close()
+
+    # BANK has value + momentum + low_vol but no quality/profitability -> 3 of 5 groups.
+    assert prof.loc["BANK", "completeness"] == pytest.approx(0.6)
+    assert prof.loc["GOOD", "completeness"] == pytest.approx(1.0)
+    # The shrinkage formula holds exactly, and a fully-measured name is unchanged.
+    for t in ("BANK", "GOOD"):
+        comp = prof.loc[t, "completeness"]
+        assert prof.loc[t, "composite"] == pytest.approx(
+            comp * prof.loc[t, "composite_raw"] + (1 - comp) * 50.0)
+    assert prof.loc["GOOD", "composite"] == pytest.approx(prof.loc["GOOD", "composite_raw"])
+    # BANK is cheap (raw composite above neutral) but gets pulled toward 50, never fabricated up.
+    assert prof.loc["BANK", "composite_raw"] > 50.0
+    assert prof.loc["BANK", "composite"] < prof.loc["BANK", "composite_raw"]
+    # The fix: a fully-measured name outranks the partial-data BANK, which never tops the screen.
+    assert prof.index[0] != "BANK"
+    assert prof.index.get_loc("GOOD") < prof.index.get_loc("BANK")
+
+
+# --------------------------------------------------------------------------- #
 # Price factors: momentum direction + low-volatility inversion
 # --------------------------------------------------------------------------- #
 @pytest.fixture

@@ -16,6 +16,14 @@ Fundamentals use a consistent **annual (10-K) basis** taken point-in-time, so tr
 earnings line up with the latest audited year. Market cap and price factors use the
 latest data known on `as_of`. Any metric whose inputs are missing is left NaN and is
 simply absent from that name's ranks (it never becomes a fabricated 0).
+
+**Data-completeness handling (so sparse data can't masquerade as strength):** the composite is the
+mean of a name's AVAILABLE factor groups, then **shrunk toward the neutral 50th percentile by the
+fraction of UNMEASURED groups** (`completeness`). A bank/REIT with no quality/profitability tags
+therefore can't top the screen on just value+momentum+low-vol -- its missing factors count as no
+signal, not strength. Fully-measured names are unchanged; `composite_raw` is kept for transparency
+and raw group ranks stay "Not estimated" when absent (this is a ranking convention, not imputation
+of any metric value).
 """
 
 from __future__ import annotations
@@ -173,6 +181,18 @@ def _factor_profile(
     for group, members in FACTOR_GROUPS.items():
         present = [m for m in members if m in ranks.columns]
         out[group] = ranks[present].mean(axis=1) if present else pd.NA
+
+    # Data-completeness handling. The raw composite is the mean of a name's AVAILABLE factor groups,
+    # which lets a sparse-data name (e.g. a bank/REIT with no quality/profitability tags) float to the
+    # top on just value+momentum+low-vol -- a false hidden gem. So we shrink the composite toward the
+    # NEUTRAL 50th percentile by the fraction of unmeasured groups: an unmeasured factor contributes no
+    # signal (neither strength nor weakness), and the score regresses to neutral the less we can see.
+    # Fully-measured names (completeness 1.0) are unchanged; raw values are never fabricated (the
+    # missing group ranks stay NaN / "Not estimated" -- this is a ranking convention, not imputation
+    # of any metric value). `composite_raw` is kept alongside for full transparency.
     group_cols = list(FACTOR_GROUPS.keys())
-    out["composite"] = out[group_cols].mean(axis=1)
+    out["completeness"] = out[group_cols].notna().sum(axis=1) / float(len(group_cols))
+    out["composite_raw"] = out[group_cols].mean(axis=1)            # mean of available groups
+    out["composite"] = (out["completeness"] * out["composite_raw"]
+                        + (1.0 - out["completeness"]) * 50.0)
     return out.sort_values("composite", ascending=False)
