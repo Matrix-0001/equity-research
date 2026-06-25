@@ -20,9 +20,11 @@ surface caveats. It never produces a number of its own and never overrides a com
 ## Stack & environment
 - Python 3.12 at `%LOCALAPPDATA%\Programs\Python\Python312`; project venv at `.venv`.
 - DuckDB + Parquet for local storage (`./data`, git-ignored). pandas/pyarrow.
-- Run tests: `.venv\Scripts\python -m pytest -q`  (currently **174/174 green**).
+- Run tests: `.venv\Scripts\python -m pytest -q`  (currently **175/175 green**).
 - Optional LLM: `pip install -e .[llm]` + `ANTHROPIC_API_KEY` (default model `claude-opus-4-8`,
   override `EQR_LLM_MODEL`). Without it, narratives read "Not estimated".
+- Optional UI (Plotly Dash): `pip install -e .[ui]` then `python -m equity_research.ui` ->
+  http://127.0.0.1:8050 (read-only screen viewer; Phase A). Core CLI runs fully without it.
 
 ## CLI (run from repo root so data lands in ./data)
 ```
@@ -142,7 +144,14 @@ pushes (only if green).
 - `cli.py` — `pull` / `pull-sp500` / `universe` / `screen` / `report` / `construct` / `pull-macro` /
   `macro` / `exposures` / `pull-sectors` / `backtest` / `backtest-compare` / `pull-index-history` /
   `pull-simfin` / **`pull-universe`** (sp500/sp400/sp600/sp1500, resumable). `screen` takes
-  `--min-cap/--min-adv/--min-price` to relax the floor toward smaller, less-followed names.
+  `--min-cap/--min-adv/--min-price` to relax the floor + `--profile balanced|potential`.
+- `ui/` — **optional Plotly Dash UI** (`[ui]` extra). Phase A: a read-only screen viewer over the
+  loaded DuckDB (read-only connections -> multi-user safe), with the honesty chrome baked in (always-on
+  disclaimer, data-freshness from the snapshot registry, completeness surfaced + sparse rows muted),
+  the profile/completeness/cap controls, a market-cap-vs-composite scatter, and the full
+  sortable/filterable factor table. `python -m equity_research.ui`. NEXT: report/construct/backtest
+  screens, then a scheduler + live updates + auth + deploy (so friends can view it). Plan is honesty-
+  first: it shows ALL data, makes no recommendations, and never turns the tool into an oracle.
 
 ## Status & data lane
 - **Phase 0 + v1 + v2 + v3 (Phase A, B & C) complete.** Data lanes are all **free**: EDGAR

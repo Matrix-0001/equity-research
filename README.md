@@ -63,7 +63,7 @@ cost.* **v3 Phase C: out-of-sample discipline** — Probabilistic + Deflated Sha
 `backtest-compare` race (multiple-testing-correct, selects in-sample only), a multi-regime stress
 table (dot-com / GFC / COVID / 2022 / normal; unreached regimes read "Not estimated"), and locked-test
 enforcement (in-sample vs out-of-sample tail). Python 3.12 + `.venv`
-installed; **174/174 tests pass** (point-in-time, survivorship-free universe, EDGAR
+installed; **175/175 tests pass** (point-in-time, survivorship-free universe, EDGAR
 flow-duration logic, factor math, flags, valuation, upsert persistence, report assembly, LLM parsing,
 v2 portfolio weighting / position+sector+liquidity caps / Kelly, vintage-aware FRED/ALFRED macro,
 macro exposure regressions, SIC->sector mapping, v3 cost model / metrics / walk-forward engine
@@ -90,10 +90,11 @@ the storage / point-in-time / universe / factor layers don't change.
 
 ### Quickstart
 ```
-.venv\Scripts\python -m pytest -q                                     # 174/174
+.venv\Scripts\python -m pytest -q                                     # 175/175
 .venv\Scripts\python -m equity_research.cli pull-universe --index sp1500  # load the full S&P 1500 (large+mid+small; resumable)
 .venv\Scripts\python -m equity_research.cli screen --min-complete 1.0     # only fully-measured names (completeness-shrunk composite)
 .venv\Scripts\python -m equity_research.cli screen --profile potential --min-complete 1.0  # hidden-gem tilt: value+profitability+size heavy, momentum light
+pip install -e .[ui]  &&  .venv\Scripts\python -m equity_research.ui                  # optional local web UI (Plotly Dash) -> http://127.0.0.1:8050
 .venv\Scripts\python -m equity_research.cli pull-sp500 --limit 50     # seed the universe (accumulates)
 .venv\Scripts\python -m equity_research.cli universe                  # what's loaded
 .venv\Scripts\python -m equity_research.cli screen                    # factor ranks, whole universe

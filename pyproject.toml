@@ -22,6 +22,11 @@ dev = [
 llm = [
     "anthropic>=0.40",
 ]
+# Optional: the local web UI (Plotly Dash). The core CLI runs fully without it.
+ui = [
+    "dash>=4.0",
+    "plotly>=6.0",
+]
 
 [build-system]
 requires = ["hatchling"]
