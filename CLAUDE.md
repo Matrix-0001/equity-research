@@ -20,7 +20,7 @@ surface caveats. It never produces a number of its own and never overrides a com
 ## Stack & environment
 - Python 3.12 at `%LOCALAPPDATA%\Programs\Python\Python312`; project venv at `.venv`.
 - DuckDB + Parquet for local storage (`./data`, git-ignored). pandas/pyarrow.
-- Run tests: `.venv\Scripts\python -m pytest -q`  (currently **178/178 green**).
+- Run tests: `.venv\Scripts\python -m pytest -q`  (currently **179/179 green**).
 - Optional LLM: `pip install -e .[llm]` + `ANTHROPIC_API_KEY` (default model `claude-opus-4-8`,
   override `EQR_LLM_MODEL`). Without it, narratives read "Not estimated".
 - Optional UI (Plotly Dash): `pip install -e .[ui]` then `python -m equity_research.ui` ->

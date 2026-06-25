@@ -124,15 +124,23 @@ def build_app() -> Dash:
             ]),
             html.Div(id="summary", style={"fontSize": "13px", "color": "#444",
                                           "marginBottom": "8px"}),
-            html.Div(style=_CARD, children=[dcc.Graph(id="scatter", config={"displModeBar": False})]),
+            dcc.Store(id="screen-data"),
+            html.Div(style=_CARD, children=[
+                dcc.Graph(id="scatter",
+                          config={"displayModeBar": True, "modeBarButtonsToRemove": ["autoScale2d"]}),
+                html.Div("The top names are labelled on the chart. Drag a box (or lasso) over dots to "
+                         "list just those companies in the table below; double-click the chart to clear.",
+                         style={"fontSize": "11px", "color": "#888", "marginTop": "4px"}),
+            ]),
             html.Div(style=_CARD, children=[
                 dash_table.DataTable(
                     id="table",
-                    columns=[{"name": c, "id": c} for c in _TABLE_COLS],
+                    columns=[{"name": c, "id": c} for c in ["rank", *_TABLE_COLS]],
                     sort_action="native", filter_action="native", page_size=25,
                     style_cell={"fontFamily": "monospace", "fontSize": "12px", "padding": "4px 8px",
                                 "textAlign": "right"},
                     style_cell_conditional=[
+                        {"if": {"column_id": "rank"}, "width": "44px", "color": "#888"},
                         {"if": {"column_id": "ticker"}, "textAlign": "left", "fontWeight": "bold"},
                         {"if": {"column_id": "company"}, "textAlign": "left", "maxWidth": "210px",
                          "overflow": "hidden", "textOverflow": "ellipsis"},
@@ -155,35 +163,69 @@ def build_app() -> Dash:
     )
 
     @app.callback(
-        Output("scatter", "figure"), Output("table", "data"), Output("summary", "children"),
-        Output("freshness", "children"),
+        Output("scatter", "figure"), Output("screen-data", "data"), Output("freshness", "children"),
         Input("profile", "value"), Input("min-complete", "value"), Input("max-cap", "value"),
     )
-    def _update(profile, min_complete, max_cap):
-        df = _screen(profile, min_complete or 0.0)
+    def _update_chart(profile, min_complete, max_cap):
         fresh = _freshness_text()
+        df = _screen(profile, min_complete or 0.0)
         if df.empty:
-            empty = px.scatter(title="No data loaded -- run `pull-universe --index sp1500` first")
-            return empty, [], "No universe loaded.", fresh
+            return (px.scatter(title="No data loaded -- run `pull-universe --index sp1500` first"),
+                    [], fresh)
         if max_cap and max_cap > 0:
             df = df[df["mcap_$B"] <= max_cap]
-        n = len(df)
+        df = df.sort_values("composite", ascending=False).reset_index(drop=True)
+        df["rank"] = df.index + 1
+        df["label"] = ""                                   # label only the top names on the chart
+        top = min(15, len(df))
+        df.loc[df.index < top, "label"] = df.loc[df.index < top, "ticker"]
         fig = px.scatter(
-            df, x="mcap_$B", y="composite", color="complete%",
-            hover_name="ticker",
+            df, x="mcap_$B", y="composite", color="complete%", hover_name="ticker", text="label",
             hover_data={"company": True, "sector": True, **{g: True for g in _GROUPS},
-                        "mcap_$B": ":.2f", "complete%": False},
+                        "mcap_$B": ":.2f", "complete%": False, "label": False},
             color_continuous_scale="Tealgrn", log_x=True,
             labels={"mcap_$B": "market cap ($B, log)", "composite": "composite rank"},
         )
-        fig.update_layout(margin=dict(l=10, r=10, t=10, b=10), height=340,
+        fig.update_traces(marker=dict(size=8, opacity=0.7), textposition="top center",
+                          textfont=dict(size=9), cliponaxis=False)
+        fig.update_layout(margin=dict(l=10, r=10, t=10, b=10), height=400, dragmode="select",
                           coloraxis_colorbar=dict(title="data %"))
-        fig.update_traces(marker=dict(size=7, opacity=0.7))
-        summary = (f"{n} names shown | profile '{profile}' | the cheapest/best small names sit "
-                   f"top-left (small cap, high composite).")
-        return fig, df[_TABLE_COLS].to_dict("records"), summary, fresh
+        return fig, df.to_dict("records"), fresh
+
+    @app.callback(
+        Output("table", "data"), Output("summary", "children"),
+        Input("screen-data", "data"), Input("scatter", "selectedData"),
+    )
+    def _update_table(data, selected):
+        rows, note = _select_rows(data, selected)
+        if not rows:
+            return [], note
+        df = pd.DataFrame(rows)
+        return df[["rank", *_TABLE_COLS]].to_dict("records"), note
 
     return app
+
+
+def _select_rows(data: list[dict] | None, selected: dict | None) -> tuple[list[dict], str]:
+    """Rows + caption for the table: the chart's box/lasso selection, else the whole current view.
+
+    Pure (no Dash/DB) so it is unit-testable. `data` is the ranked screen (one row per plotted dot,
+    in chart order); a selected point's `pointNumber` maps straight back to its row.
+    """
+    if not data:
+        return [], "No universe loaded -- run `pull-universe --index sp1500` first."
+    n = len(data)
+    if selected and selected.get("points"):
+        idx = sorted({
+            p.get("pointNumber", p.get("pointIndex")) for p in selected["points"]
+            if isinstance(p.get("pointNumber", p.get("pointIndex")), int)
+        })
+        rows = [data[i] for i in idx if 0 <= i < n]
+        note = (f"{len(rows)} companies selected on the chart (of {n} shown), ranked by composite. "
+                f"Double-click the chart to clear.")
+        return rows, note
+    return data, (f"{n} names shown, ranked by composite. Tip: drag a box over dots on the chart "
+                  f"to list just those companies here.")
 
 
 def main() -> None:
