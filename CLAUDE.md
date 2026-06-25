@@ -20,7 +20,7 @@ surface caveats. It never produces a number of its own and never overrides a com
 ## Stack & environment
 - Python 3.12 at `%LOCALAPPDATA%\Programs\Python\Python312`; project venv at `.venv`.
 - DuckDB + Parquet for local storage (`./data`, git-ignored). pandas/pyarrow.
-- Run tests: `.venv\Scripts\python -m pytest -q`  (currently **173/173 green**).
+- Run tests: `.venv\Scripts\python -m pytest -q`  (currently **174/174 green**).
 - Optional LLM: `pip install -e .[llm]` + `ANTHROPIC_API_KEY` (default model `claude-opus-4-8`,
   override `EQR_LLM_MODEL`). Without it, narratives read "Not estimated".
 
@@ -95,7 +95,10 @@ pushes (only if green).
 - `factors.py` — value/quality/profitability/momentum/low-vol/**size** (smaller=higher; a hidden-gem
   tilt -- caveated as weak/decayed standalone, earns its place only with value+quality) as
   within-universe percentile ranks. **Composite is completeness-shrunk** toward neutral 50 by the
-  unmeasured-group fraction, so sparse-data names (banks/REITs) can't top the screen on a partial profile.
+  unmeasured-group fraction, so sparse-data names (banks/REITs) can't top the screen on a partial
+  profile. **`COMPOSITE_PROFILES`** weight the groups: `balanced` (equal) or `potential` (value+
+  profitability+size heavy, momentum light -- the undervalued tilt); `screen --profile`. Explicit
+  auditable assumptions, never a return prediction.
 - `valuation.py` — reverse-DCF *implied* growth (range over discount rates) + relative multiples vs peers.
 - `flags.py` — Piotroski F, Altman Z, Beneish M (scores + components + missing-list).
 - `report.py` — assembles the full `SecurityReport` from the above.

@@ -70,6 +70,20 @@ FACTOR_GROUPS: dict[str, list[str]] = {
     "size": ["size"],
 }
 
+# Composite weighting profiles: how the 6 factor groups blend into the composite. These are explicit,
+# auditable ASSUMPTIONS (a deliberate tilt), NOT a claim that the tilt predicts returns -- the output
+# is still a within-universe rank, never a forecast.
+#   - balanced:  equal weight (the neutral default; unchanged from before).
+#   - potential: the hidden-gem tilt -- heavy on value + profitability + size (cheap, good, small,
+#                less-followed), light on momentum (which rewards "already up"). Expresses the
+#                undervalued thesis; the completeness shrinkage still keeps small *junk* with missing
+#                fundamentals from ranking high. Weights need not sum to 1 (they are normalized).
+COMPOSITE_PROFILES: dict[str, dict[str, float]] = {
+    "balanced": {g: 1.0 for g in FACTOR_GROUPS},
+    "potential": {"value": 0.30, "profitability": 0.25, "size": 0.20,
+                  "quality": 0.15, "low_vol": 0.05, "momentum": 0.05},
+}
+
 
 @dataclass(frozen=True)
 class FactorConfig:
@@ -159,25 +173,27 @@ def factor_profile(
     as_of: dt.date,
     cfg: Config = config,
     fcfg: FactorConfig = FactorConfig(),
+    profile: str = "balanced",
     _cache: dict | None = None,
 ) -> pd.DataFrame:
     """Per-ticker factor-group percentile ranks + composite, for the universe.
 
-    Columns: the five factor groups (value/quality/profitability/momentum/low_vol),
-    a `composite` (mean of available groups), `n_metrics` (how many of the eight raw
-    metrics were computable — feeds the report's data-completeness/confidence), and
-    `market_cap`. Sorted by composite descending. `_cache` (run-scoped, optional) memoizes
-    the whole profile by `as_of` + config so repeated rebalances/strategies don't recompute it.
+    Columns: the six factor groups (value/quality/profitability/momentum/low_vol/size), a
+    `composite` (the chosen `profile`'s weighting of the groups, completeness-shrunk), `composite_raw`
+    (over present groups only, for transparency), `completeness`, `n_metrics` (how many of the eight
+    raw metrics were computable), and `market_cap`. Sorted by composite descending. `profile` selects
+    a weighting from `COMPOSITE_PROFILES` (default 'balanced' = equal). `_cache` (run-scoped) memoizes
+    by `as_of` + config + profile so repeated rebalances/strategies don't recompute it.
     """
     return cache_get(
-        _cache, ("factors", as_of.isoformat(), id(cfg), id(fcfg)),
-        lambda: _factor_profile(conn, as_of, cfg, fcfg, _cache),
+        _cache, ("factors", as_of.isoformat(), id(cfg), id(fcfg), profile),
+        lambda: _factor_profile(conn, as_of, cfg, fcfg, profile, _cache),
     )
 
 
 def _factor_profile(
     conn: duckdb.DuckDBPyConnection, as_of: dt.date, cfg: Config, fcfg: FactorConfig,
-    _cache: dict | None,
+    profile: str, _cache: dict | None,
 ) -> pd.DataFrame:
     raw = compute_raw_metrics(conn, as_of, cfg, fcfg, _cache=_cache)
     if raw.empty:
@@ -201,8 +217,18 @@ def _factor_profile(
     # missing group ranks stay NaN / "Not estimated" -- this is a ranking convention, not imputation
     # of any metric value). `composite_raw` is kept alongside for full transparency.
     group_cols = list(FACTOR_GROUPS.keys())
-    out["completeness"] = out[group_cols].notna().sum(axis=1) / float(len(group_cols))
-    out["composite_raw"] = out[group_cols].mean(axis=1)            # mean of available groups
-    out["composite"] = (out["completeness"] * out["composite_raw"]
-                        + (1.0 - out["completeness"]) * 50.0)
+    weights = COMPOSITE_PROFILES.get(profile, COMPOSITE_PROFILES["balanced"])
+    w = pd.Series({g: float(weights.get(g, 0.0)) for g in group_cols})
+    w_total = float(w.sum())
+    groups = out[group_cols]
+    present_w = (groups.notna() * w).sum(axis=1)              # weight of the groups we can see
+    # completeness = fraction of TOTAL factor weight that is measured (so missing a high-weight
+    # factor like value costs more than missing a low-weight one like momentum). For 'balanced'
+    # this is just (groups present)/6.
+    out["completeness"] = present_w / w_total
+    # composite_raw = the profile-weighted mean over PRESENT groups only (for transparency).
+    out["composite_raw"] = (groups.fillna(0.0) * w).sum(axis=1) / present_w.where(present_w > 0)
+    # composite = the weighted mean with UNMEASURED groups counted as the neutral 50th percentile
+    # (no signal), i.e. shrunk toward 50 by the unmeasured weight -- a sparse profile can't rank top.
+    out["composite"] = (groups.fillna(50.0) * w).sum(axis=1) / w_total
     return out.sort_values("composite", ascending=False)

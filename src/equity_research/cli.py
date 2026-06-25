@@ -88,18 +88,22 @@ def _floor_cfg(min_cap: float | None, min_adv: float | None, min_price: float | 
 
 def _screen(asof: dt.date, top: int, min_cap: float | None = None,
             min_adv: float | None = None, min_price: float | None = None,
-            min_complete: float | None = None) -> None:
+            min_complete: float | None = None, profile: str = "balanced") -> None:
     cfg = _floor_cfg(min_cap, min_adv, min_price)
     fl = cfg.universe_floor
     conn = storage.connect()
     try:
-        prof = factors.factor_profile(conn, asof, cfg)
+        prof = factors.factor_profile(conn, asof, cfg, profile=profile)
     finally:
         conn.close()
     print(f"Universe floor: mktcap >= ${fl.min_market_cap_usd:,.0f}, 20d ADV >= "
           f"${fl.min_avg_dollar_volume_usd:,.0f}, price >= ${fl.min_price_usd:.2f}"
           + ("  (relaxed -- reaches smaller names; data is thinner/noisier down here)"
              if cfg is not config else ""))
+    pw = factors.COMPOSITE_PROFILES.get(profile, factors.COMPOSITE_PROFILES["balanced"])
+    tot = sum(pw.values())
+    wstr = ", ".join(f"{g} {pw[g] / tot:.0%}" for g in factors.FACTOR_GROUPS)
+    print(f"Composite profile: {profile}  (group weights: {wstr})")
     if prof.empty:
         print("No data in the universe. Run `pull TICKERS...` or `pull-universe` first.")
         return
@@ -470,8 +474,12 @@ def main(argv: list[str] | None = None) -> None:
     screen.add_argument("--min-price", type=float, default=None,
                         help=f"min price override (default ${config.universe_floor.min_price_usd:.2f})")
     screen.add_argument("--min-complete", type=float, default=None, metavar="FRAC",
-                        help="only show names measured on at least this fraction of the 5 factor "
+                        help="only show names measured on at least this fraction of the factor "
                              "groups (e.g. 0.8); filters out sparse-data names like banks/REITs")
+    screen.add_argument("--profile", default="balanced",
+                        choices=list(factors.COMPOSITE_PROFILES),
+                        help="composite weighting: 'balanced' (equal) or 'potential' (value+"
+                             "profitability+size-heavy, momentum-light -- the hidden-gem tilt)")
 
     report = sub.add_parser("report", help="Per-ticker factor ranks + valuation + flags")
     report.add_argument("ticker", help="e.g. AAPL")
@@ -613,7 +621,7 @@ def main(argv: list[str] | None = None) -> None:
         _pull(args.tickers, dt.date.fromisoformat(args.asof))
     elif args.cmd == "screen":
         _screen(dt.date.fromisoformat(args.asof), args.top,
-                args.min_cap, args.min_adv, args.min_price, args.min_complete)
+                args.min_cap, args.min_adv, args.min_price, args.min_complete, args.profile)
     elif args.cmd == "report":
         _report(args.ticker, dt.date.fromisoformat(args.asof))
     elif args.cmd == "construct":

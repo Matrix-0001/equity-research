@@ -136,6 +136,29 @@ def test_completeness_shrinks_partial_data_composite(tmp_path):
     assert prof.index.get_loc("GOOD") < prof.index.get_loc("BANK")
 
 
+def test_composite_profiles_weight_the_groups(fundamental_conn):
+    # 'balanced' = equal-weight mean of the 6 groups; 'potential' = value/profitability/size-heavy,
+    # momentum-light. Verify both against the group ranks the screen actually produced.
+    cfg = Config(data_dir="/unused")
+    groups = list(factors.FACTOR_GROUPS)
+    prof_b = factors.factor_profile(fundamental_conn, AS_OF, cfg, profile="balanced")
+    prof_p = factors.factor_profile(fundamental_conn, AS_OF, cfg, profile="potential")
+    w = factors.COMPOSITE_PROFILES["potential"]
+    wtot = sum(w.values())
+    n_checked = 0
+    for t in prof_b.index:
+        gv = prof_b.loc[t, groups]
+        if gv.notna().all():                       # fully-measured name
+            assert prof_b.loc[t, "composite"] == pytest.approx(gv.mean())            # equal weight
+            assert prof_p.loc[t, "composite"] == pytest.approx(
+                sum(w[g] * gv[g] for g in groups) / wtot)                            # weighted
+            n_checked += 1
+    assert n_checked >= 3
+    # The tilt is not a no-op: it changes at least one name's composite.
+    common = prof_b["composite"].reindex(prof_p.index)
+    assert (common.round(6) != prof_p["composite"].round(6)).any()
+
+
 # --------------------------------------------------------------------------- #
 # Price factors: momentum direction + low-volatility inversion
 # --------------------------------------------------------------------------- #
