@@ -260,18 +260,7 @@ def build_app() -> Dash:
         df["label"] = ""                                   # label only the top names on the chart
         top = min(15, len(df))
         df.loc[df.index < top, "label"] = df.loc[df.index < top, "ticker"]
-        fig = px.scatter(
-            df, x="mcap_$B", y="composite", color="complete%", hover_name="ticker", text="label",
-            hover_data={"company": True, "sector": True, **{g: True for g in _GROUPS},
-                        "mcap_$B": ":.2f", "complete%": False, "label": False},
-            color_continuous_scale="Tealgrn", log_x=True,
-            labels={"mcap_$B": "market cap ($B, log)", "composite": "composite rank"},
-        )
-        fig.update_traces(marker=dict(size=8, opacity=0.7), textposition="top center",
-                          textfont=dict(size=9), cliponaxis=False)
-        fig.update_layout(margin=dict(l=10, r=10, t=10, b=10), height=400, dragmode="select",
-                          coloraxis_colorbar=dict(title="data %"))
-        return fig, df.to_dict("records"), fresh
+        return _scatter_figure(df), df.to_dict("records"), fresh
 
     @app.callback(
         Output("table", "data"), Output("table", "tooltip_data"), Output("summary", "children"),
@@ -299,6 +288,26 @@ def build_app() -> Dash:
         return _report_card(ticker)
 
     return app
+
+
+def _scatter_figure(df: pd.DataFrame):
+    """Market-cap (log) vs composite scatter, coloured by completeness, top names labelled.
+
+    Module-level + pure so it is unit-tested (building the figure is where a bad Plotly property
+    would otherwise only blow up at request time, 500-ing the callback and emptying the view).
+    """
+    fig = px.scatter(
+        df, x="mcap_$B", y="composite", color="complete%", hover_name="ticker", text="label",
+        hover_data={"company": True, "sector": True, **{g: True for g in _GROUPS},
+                    "mcap_$B": ":.2f", "complete%": False, "label": False},
+        color_continuous_scale="Tealgrn", log_x=True,
+        labels={"mcap_$B": "market cap ($B, log)", "composite": "composite rank"},
+    )
+    fig.update_traces(marker=dict(size=8, opacity=0.7), textposition="top center",
+                      textfont=dict(size=9))
+    fig.update_layout(margin=dict(l=10, r=10, t=10, b=10), height=400, dragmode="select",
+                      coloraxis_colorbar=dict(title="data %"))
+    return fig
 
 
 def _select_rows(data: list[dict] | None, selected: dict | None) -> tuple[list[dict], str]:

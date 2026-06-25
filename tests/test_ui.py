@@ -2,11 +2,24 @@
 
 from __future__ import annotations
 
+import pandas as pd
 import pytest
 
 pytest.importorskip("dash")  # UI is an optional extra; skip if dash isn't installed
 
-from equity_research.ui.app import _select_rows, build_app  # noqa: E402
+from equity_research.ui.app import _GROUPS, _scatter_figure, _select_rows, build_app  # noqa: E402
+
+
+def test_scatter_figure_builds_without_error():
+    # Building the figure is where a bad Plotly property (e.g. cliponaxis) would only surface at
+    # request time and 500 the callback -> empty view. Pin that it builds from a minimal frame.
+    df = pd.DataFrame({
+        "mcap_$B": [1.0, 2.5], "composite": [80.0, 70.0], "complete%": [100.0, 80.0],
+        "ticker": ["AA", "BB"], "company": ["Alpha Inc", "Beta Corp"], "sector": ["IT", "Health"],
+        "label": ["AA", ""], **{g: [50.0, 60.0] for g in _GROUPS},
+    })
+    fig = _scatter_figure(df)
+    assert fig is not None and len(fig.data) >= 1
 
 
 def test_ui_app_builds_with_honesty_chrome():
