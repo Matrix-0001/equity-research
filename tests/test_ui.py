@@ -7,7 +7,18 @@ import pytest
 
 pytest.importorskip("dash")  # UI is an optional extra; skip if dash isn't installed
 
-from equity_research.ui.app import _GROUPS, _scatter_figure, _select_rows, build_app  # noqa: E402
+from equity_research.ui.app import (  # noqa: E402
+    _GROUPS, _scatter_figure, _select_rows, _weights_figure, build_app,
+)
+
+
+def test_weights_figure_builds_without_error():
+    rows = [{"ticker": "AA", "company": "A Inc", "sector": "IT", "weight%": 40.0,
+             "risk_contrib%": 35.0},
+            {"ticker": "BB", "company": "B Inc", "sector": "Health", "weight%": 60.0,
+             "risk_contrib%": 65.0}]
+    fig = _weights_figure(rows)
+    assert fig is not None and len(fig.data) >= 1
 
 
 def test_scatter_figure_builds_without_error():
@@ -26,10 +37,12 @@ def test_ui_app_builds_with_honesty_chrome():
     app = build_app()
     assert app.title == "Equity Research - local"
     assert app.layout is not None
-    # The persistent disclaimer / honesty framing is baked into the layout, not optional.
+    # The persistent disclaimer / honesty framing is baked into the layout, not optional, and both
+    # tabs (Screen + Construct) are present.
     rendered = str(app.layout)
     assert "not investment advice" in rendered
-    assert "hidden-gem screen" in rendered
+    assert "Construct portfolio" in rendered
+    assert "Full report" in rendered
 
 
 def test_select_rows_follows_chart_selection():

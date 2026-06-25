@@ -244,7 +244,7 @@ precompute standard runs + background custom runs in the UI layer rather than co
 > (the v3 build spec — especially **§8 "Phase C — how to proceed"**).
 >
 > State of play: **v1 + v2 + v3 Phase A, B & C are COMPLETE** (Phase C committed when you ask) on GitHub
-> `Matrix-0001/equity-research` (`main`); **182/182 tests pass** (`.venv\Scripts\python -m pytest -q`).
+> `Matrix-0001/equity-research` (`main`); **183/183 tests pass** (`.venv\Scripts\python -m pytest -q`).
 > ALL data is FREE: EDGAR fundamentals + Yahoo prices (deep daily) + FRED/ALFRED macro; and for
 > survivorship-free backtests, **fja05680 point-in-time S&P 500 membership (MIT) + SimFin free delisted
 > prices (~2019+)**. Keys `FRED_API_KEY`, `FMP_API_KEY`, `SIMFIN_API_KEY` are in the local `.env`
