@@ -20,7 +20,7 @@ surface caveats. It never produces a number of its own and never overrides a com
 ## Stack & environment
 - Python 3.12 at `%LOCALAPPDATA%\Programs\Python\Python312`; project venv at `.venv`.
 - DuckDB + Parquet for local storage (`./data`, git-ignored). pandas/pyarrow.
-- Run tests: `.venv\Scripts\python -m pytest -q`  (currently **179/179 green**).
+- Run tests: `.venv\Scripts\python -m pytest -q`  (currently **181/181 green**).
 - Optional LLM: `pip install -e .[llm]` + `ANTHROPIC_API_KEY` (default model `claude-opus-4-8`,
   override `EQR_LLM_MODEL`). Without it, narratives read "Not estimated".
 - Optional UI (Plotly Dash): `pip install -e .[ui]` then `python -m equity_research.ui` ->
@@ -145,13 +145,15 @@ pushes (only if green).
   `macro` / `exposures` / `pull-sectors` / `backtest` / `backtest-compare` / `pull-index-history` /
   `pull-simfin` / **`pull-universe`** (sp500/sp400/sp600/sp1500, resumable). `screen` takes
   `--min-cap/--min-adv/--min-price` to relax the floor + `--profile balanced|potential`.
-- `ui/` — **optional Plotly Dash UI** (`[ui]` extra). Phase A: a read-only screen viewer over the
-  loaded DuckDB (read-only connections -> multi-user safe), with the honesty chrome baked in (always-on
-  disclaimer, data-freshness from the snapshot registry, completeness surfaced + sparse rows muted),
-  the profile/completeness/cap controls, a market-cap-vs-composite scatter, and the full
-  sortable/filterable factor table. `python -m equity_research.ui`. NEXT: report/construct/backtest
-  screens, then a scheduler + live updates + auth + deploy (so friends can view it). Plan is honesty-
-  first: it shows ALL data, makes no recommendations, and never turns the tool into an oracle.
+- `ui/` — **optional Plotly Dash UI** (`[ui]` extra). Read-only screen viewer over the loaded DuckDB
+  (read-only connections -> multi-user safe), honesty chrome baked in (always-on disclaimer, data-
+  freshness from the snapshot registry, completeness surfaced + sparse rows muted). Controls: composite
+  **profile** (balanced/potential), min-completeness, max-cap, **sector** filter. A market-cap-vs-
+  composite **scatter** (top names labelled; **box/lasso-select dots -> the table lists just those**),
+  the full sortable/filterable factor table (ticker / **company** / **sector** / ranks / composite /
+  rank), and a **full-report view** (searchable company picker, or click a dot -> the SecurityReport
+  computed figures). `python -m equity_research.ui`. NEXT: construct/backtest screens, then scheduler +
+  live updates + auth + deploy (friends). Shows ALL data, makes no recommendations, never an oracle.
 
 ## Status & data lane
 - **Phase 0 + v1 + v2 + v3 (Phase A, B & C) complete.** Data lanes are all **free**: EDGAR

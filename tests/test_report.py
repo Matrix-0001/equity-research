@@ -57,6 +57,24 @@ def _conn(tmp_path):
     return c
 
 
+def test_report_uses_company_name_from_securities(tmp_path):
+    conn = _conn(tmp_path)
+    storage.load_table(conn, pd.DataFrame([
+        {"ticker": "AAA", "cik": 1, "company": "Alpha Industries Inc", "sic": 3571,
+         "sic_description": "Computers", "sector": "Information Technology"},
+    ]), "securities")
+    rep = report.build_security_report(conn, AS_OF, "AAA", Config(data_dir=tmp_path), use_llm=False)
+    conn.close()
+    assert rep.company == "Alpha Industries Inc"   # real name, not the ticker fallback
+
+
+def test_report_company_falls_back_to_ticker_without_securities(tmp_path):
+    conn = _conn(tmp_path)
+    rep = report.build_security_report(conn, AS_OF, "AAA", Config(data_dir=tmp_path), use_llm=False)
+    conn.close()
+    assert rep.company == "AAA"                     # no securities table -> ticker, never blank
+
+
 def test_report_assembly_offline(tmp_path):
     conn = _conn(tmp_path)
     rep = report.build_security_report(conn, AS_OF, "AAA", Config(data_dir=tmp_path), use_llm=False)

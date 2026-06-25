@@ -21,7 +21,7 @@ import pandas as pd
 import plotly.express as px
 from dash import Dash, Input, Output, dash_table, dcc, html
 
-from equity_research import factors
+from equity_research import factors, report
 from equity_research.config import config
 from equity_research.data import pit
 from equity_research.disclaimer import PERSISTENT_DISCLAIMER
@@ -75,6 +75,71 @@ def _screen(profile: str, min_complete: float) -> pd.DataFrame:
     return prof
 
 
+def _sector_options() -> list[dict]:
+    """Distinct sectors (for the sector filter dropdown); [] if securities aren't loaded."""
+    try:
+        c = _ro_conn()
+        try:
+            df = c.execute("SELECT DISTINCT sector FROM securities WHERE sector IS NOT NULL "
+                           "ORDER BY sector").df()
+        finally:
+            c.close()
+    except Exception:
+        return []
+    return [{"label": s, "value": s} for s in df["sector"].tolist()]
+
+
+def _company_options() -> list[dict]:
+    """All names as 'TICKER - Company' for the report picker (searchable); [] if not loaded."""
+    try:
+        c = _ro_conn()
+        try:
+            df = c.execute("SELECT ticker, company FROM securities ORDER BY ticker").df()
+        finally:
+            c.close()
+    except Exception:
+        return []
+    return [{"label": f"{r.ticker} - {r.company}" if str(r.company) else str(r.ticker),
+             "value": str(r.ticker)} for r in df.itertuples()]
+
+
+def _report_card(ticker: str | None):
+    """The full SecurityReport for one ticker as HTML (computed figures only; no LLM narrative)."""
+    if not ticker:
+        return html.Div("Pick a company above, or click a dot on the chart, to see its full report.",
+                        style={"color": "#888", "fontSize": "13px"})
+    c = _ro_conn()
+    try:
+        rep = report.build_security_report(c, dt.date.today(), ticker, config, use_llm=False)
+    finally:
+        c.close()
+    label_st = {"color": "#666", "fontSize": "12px", "padding": "5px 14px 5px 0",
+                "verticalAlign": "top", "whiteSpace": "nowrap", "textAlign": "left"}
+    val_st = {"fontSize": "13px", "padding": "5px 0", "textAlign": "left"}
+    rows = [
+        ("Confidence", rep.confidence_tier),
+        ("Data completeness", rep.data_completeness),
+        ("Valuation read", rep.valuation_read),
+        ("Factor profile", rep.factor_profile),
+        ("Quality / risk flags", rep.quality_risk_flags),
+        ("Key risks (machine)", rep.key_risks_machine),
+        ("Historical base rate", rep.historical_base_rate),
+        ("What would change this", rep.what_would_change_this),
+    ]
+    table = html.Table(
+        [html.Tr([html.Td(lbl, style=label_st), html.Td(str(val), style=val_st)])
+         for lbl, val in rows],
+        style={"width": "100%", "borderCollapse": "collapse"},
+    )
+    return html.Div([
+        html.H3(f"{rep.ticker} - {rep.company}", style={"margin": "0 0 8px"}),
+        table,
+        html.Div("Bull/bear narrative needs the optional LLM (off here); every figure above is "
+                 f"computed. {PERSISTENT_DISCLAIMER}",
+                 style={"fontSize": "11px", "color": "#888", "marginTop": "8px"}),
+    ])
+
+
 _BANNER = {
     "background": "#FBEAF0", "color": "#72243E", "padding": "8px 14px",
     "borderRadius": "8px", "fontSize": "13px", "marginBottom": "10px",
@@ -121,6 +186,11 @@ def build_app() -> Dash:
                               style={"width": "120px"}),
                     html.Span(" 0 = no cap", style={"fontSize": "11px", "color": "#999"}),
                 ]),
+                html.Div([
+                    html.Label("Sectors", style={"fontSize": "12px", "color": "#555"}),
+                    dcc.Dropdown(id="sector", options=_sector_options(), multi=True,
+                                 placeholder="All sectors", style={"width": "300px"}),
+                ]),
             ]),
             html.Div(id="summary", style={"fontSize": "13px", "color": "#444",
                                           "marginBottom": "8px"}),
@@ -137,6 +207,7 @@ def build_app() -> Dash:
                     id="table",
                     columns=[{"name": c, "id": c} for c in ["rank", *_TABLE_COLS]],
                     sort_action="native", filter_action="native", page_size=25,
+                    tooltip_duration=None,  # full company name on hover (set per-row in the callback)
                     style_cell={"fontFamily": "monospace", "fontSize": "12px", "padding": "4px 8px",
                                 "textAlign": "right"},
                     style_cell_conditional=[
@@ -159,21 +230,31 @@ def build_app() -> Dash:
                 f"Sparse-data rows (complete% < 100) are muted. | {PERSISTENT_DISCLAIMER}",
                 style={"fontSize": "11px", "color": "#888", "marginTop": "6px"},
             ),
+            html.H3("Full report", style={"marginTop": "18px", "marginBottom": "6px"}),
+            dcc.Dropdown(id="report-ticker", options=_company_options(), placeholder=
+                         "Search a company / ticker for its full SecurityReport...",
+                         style={"marginBottom": "10px"}),
+            html.Div(id="report-card", style=_CARD),
         ],
     )
 
     @app.callback(
         Output("scatter", "figure"), Output("screen-data", "data"), Output("freshness", "children"),
         Input("profile", "value"), Input("min-complete", "value"), Input("max-cap", "value"),
+        Input("sector", "value"),
     )
-    def _update_chart(profile, min_complete, max_cap):
+    def _update_chart(profile, min_complete, max_cap, sectors):
         fresh = _freshness_text()
         df = _screen(profile, min_complete or 0.0)
         if df.empty:
             return (px.scatter(title="No data loaded -- run `pull-universe --index sp1500` first"),
                     [], fresh)
+        if sectors:
+            df = df[df["sector"].isin(sectors)]
         if max_cap and max_cap > 0:
             df = df[df["mcap_$B"] <= max_cap]
+        if df.empty:
+            return px.scatter(title="No names match these filters"), [], fresh
         df = df.sort_values("composite", ascending=False).reset_index(drop=True)
         df["rank"] = df.index + 1
         df["label"] = ""                                   # label only the top names on the chart
@@ -193,15 +274,29 @@ def build_app() -> Dash:
         return fig, df.to_dict("records"), fresh
 
     @app.callback(
-        Output("table", "data"), Output("summary", "children"),
+        Output("table", "data"), Output("table", "tooltip_data"), Output("summary", "children"),
         Input("screen-data", "data"), Input("scatter", "selectedData"),
     )
     def _update_table(data, selected):
         rows, note = _select_rows(data, selected)
         if not rows:
-            return [], note
+            return [], [], note
         df = pd.DataFrame(rows)
-        return df[["rank", *_TABLE_COLS]].to_dict("records"), note
+        tooltips = [{"company": {"value": str(c), "type": "text"}} for c in df["company"]]
+        return df[["rank", *_TABLE_COLS]].to_dict("records"), tooltips, note
+
+    @app.callback(Output("report-ticker", "value"), Input("scatter", "clickData"))
+    def _click_to_report(click):
+        if click and click.get("points"):
+            tkr = click["points"][0].get("hovertext")
+            if tkr:
+                return tkr
+        from dash import no_update
+        return no_update
+
+    @app.callback(Output("report-card", "children"), Input("report-ticker", "value"))
+    def _render_report(ticker):
+        return _report_card(ticker)
 
     return app
 

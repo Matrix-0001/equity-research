@@ -96,7 +96,11 @@ def build_security_report(
     val = valuation.valuation_for(conn, as_of, t, cfg)
     flg = flags_mod.compute_flags(conn, as_of, t, cfg)
 
-    rep = SecurityReport(ticker=t, company=t)
+    info = pit.security_info(conn, [t])               # real company name + sector, if loaded
+    company = t
+    if not info.empty and str(info.iloc[0]["company"]):
+        company = str(info.iloc[0]["company"])
+    rep = SecurityReport(ticker=t, company=company)
     in_universe = (not prof.empty) and t in prof.index
     if in_universe:
         row = prof.loc[t]
