@@ -66,7 +66,7 @@ def test_report_assembly_offline(tmp_path):
     assert "composite" in rep.factor_profile
     assert "reverse-DCF implies" in rep.valuation_read       # positive FCF -> solvable
     assert "F=" in rep.quality_risk_flags and "Z=" in rep.quality_risk_flags  # flags estimated
-    assert rep.confidence_tier.startswith("High")            # 7/7 factors, 3/3 flags, DCF yes
+    assert rep.confidence_tier.startswith("High")            # 8/8 factors, 3/3 flags, DCF yes
     # Honest "Not estimated" fields:
     assert rep.historical_base_rate.startswith(NOT_ESTIMATED)
     assert rep.suggested_role_weight.startswith(NOT_ESTIMATED)

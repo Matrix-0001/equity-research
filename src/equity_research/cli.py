@@ -111,7 +111,7 @@ def _screen(asof: dt.date, top: int, min_cap: float | None = None,
     disp = prof.copy()
     disp["mcap_$B"] = (disp["market_cap"] / 1e9).round(1)
     disp["complete%"] = (disp["completeness"] * 100).round(0)
-    rank_cols = ["value", "quality", "profitability", "momentum", "low_vol", "composite"]
+    rank_cols = ["value", "quality", "profitability", "momentum", "low_vol", "size", "composite"]
     for c in rank_cols:
         disp[c] = disp[c].round(0)
     cols = ["mcap_$B", *rank_cols, "complete%", "n_metrics"]

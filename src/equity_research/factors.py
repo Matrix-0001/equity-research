@@ -11,6 +11,13 @@ evidence):
   - profitability:  gross profitability (gross profit/assets; Novy-Marx), ROA
   - momentum:       12-1 month total return (skip the most recent month)
   - low-volatility: trailing daily-return volatility (inverted, so calmer = higher)
+  - size:           market cap, INVERTED (smaller ranks higher) -- a tilt toward smaller,
+                    less-followed names where mispricing is likelier. HONESTY CAVEAT: the
+                    standalone small-cap premium is weak and has decayed since its discovery
+                    and concentrates in illiquid micro-caps; it is NOT a return predictor on its
+                    own. It earns its place only combined with value + quality (the composite
+                    does this, and the completeness shrinkage keeps small *junk* with missing
+                    fundamentals from ranking high) -- "small AND cheap AND good", never small alone.
 
 Fundamentals use a consistent **annual (10-K) basis** taken point-in-time, so trailing
 earnings line up with the latest audited year. Market cap and price factors use the
@@ -41,7 +48,7 @@ from equity_research.data import pit
 
 ANNUAL_FORMS = pit.ANNUAL_FORMS  # single source of truth lives in data.pit
 
-# metric -> +1 if higher is more attractive, -1 if lower is (volatility).
+# metric -> +1 if higher is more attractive, -1 if lower is (volatility, size).
 METRIC_DIRECTION: dict[str, int] = {
     "earnings_yield": 1,
     "book_to_market": 1,
@@ -50,6 +57,7 @@ METRIC_DIRECTION: dict[str, int] = {
     "roa": 1,
     "momentum_12_1": 1,
     "volatility": -1,
+    "size": -1,            # smaller market cap ranks higher (small-cap tilt)
 }
 
 # factor group -> contributing metrics (group rank = mean of available member ranks).
@@ -59,6 +67,7 @@ FACTOR_GROUPS: dict[str, list[str]] = {
     "profitability": ["gross_profitability", "roa"],
     "momentum": ["momentum_12_1"],
     "low_vol": ["volatility"],
+    "size": ["size"],
 }
 
 
@@ -125,6 +134,7 @@ def compute_raw_metrics(
 
     raw = pd.DataFrame(index=pd.Index(tickers, name="ticker"))
     raw["market_cap"] = mcap
+    raw["size"] = mcap                  # ranked inverted (smaller = higher) via METRIC_DIRECTION
     raw["earnings_yield"] = ni / mcap
     raw["book_to_market"] = eq / mcap
     raw["roe"] = ni / eq.where(eq > 0)          # ROE undefined for non-positive equity
@@ -154,7 +164,7 @@ def factor_profile(
     """Per-ticker factor-group percentile ranks + composite, for the universe.
 
     Columns: the five factor groups (value/quality/profitability/momentum/low_vol),
-    a `composite` (mean of available groups), `n_metrics` (how many of the seven raw
+    a `composite` (mean of available groups), `n_metrics` (how many of the eight raw
     metrics were computable — feeds the report's data-completeness/confidence), and
     `market_cap`. Sorted by composite descending. `_cache` (run-scoped, optional) memoizes
     the whole profile by `as_of` + config so repeated rebalances/strategies don't recompute it.

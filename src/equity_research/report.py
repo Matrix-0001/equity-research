@@ -21,11 +21,11 @@ from equity_research.disclaimer import NOT_ESTIMATED, ConfidenceTier, SecurityRe
 
 def _factor_profile_str(row: pd.Series) -> str:
     parts = []
-    for g in ("value", "quality", "profitability", "momentum", "low_vol"):
+    for g in ("value", "quality", "profitability", "momentum", "low_vol", "size"):
         v = row[g]
         parts.append(f"{g} {('%.0f' % v) if pd.notna(v) else 'NA'}")
     return (f"{' / '.join(parts)} (composite {row['composite']:.0f}; "
-            f"{int(row['n_metrics'])}/7 metrics) - percentiles within the loaded universe")
+            f"{int(row['n_metrics'])}/8 metrics) - percentiles within the loaded universe")
 
 
 def _valuation_str(val: valuation.ValuationResult) -> str:
@@ -79,8 +79,8 @@ def _what_would_change(in_universe, n_metrics, n_flags, has_val, flg) -> str:
     missing = [flg[k].name for k in flg if not flg[k].estimated]
     if missing:
         items.append("the missing accounting inputs for " + ", ".join(missing))
-    if n_metrics < 7:
-        items.append(f"the {7 - n_metrics} missing factor metric(s)")
+    if n_metrics < 8:
+        items.append(f"the {8 - n_metrics} missing factor metric(s)")
     return "; ".join(items[:3]) if items else "All v1 inputs present; newer filings/prices refresh it"
 
 
@@ -112,9 +112,9 @@ def build_security_report(
 
     n_flags = sum(1 for k in flg if flg[k].estimated)
     has_val = val.implied_growth is not None
-    rep.data_completeness = (f"factors {n_metrics}/7, flags {n_flags}/3, "
+    rep.data_completeness = (f"factors {n_metrics}/8, flags {n_flags}/3, "
                              f"reverse-DCF {'yes' if has_val else 'no'}")
-    score = n_metrics / 7 + n_flags / 3 + (1 if has_val else 0)
+    score = n_metrics / 8 + n_flags / 3 + (1 if has_val else 0)
     tier = (ConfidenceTier.HIGH if score >= 2.4
             else ConfidenceTier.MEDIUM if score >= 1.4 else ConfidenceTier.LOW)
     rep.confidence_tier = f"{tier.value} (mechanical, from data completeness)"

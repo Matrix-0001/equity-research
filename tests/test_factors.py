@@ -78,7 +78,7 @@ def test_missing_input_is_nan_not_zero(fundamental_conn):
     assert pd.isna(raw.loc["T6", "earnings_yield"])
     assert pd.isna(ranks.loc["T6", "earnings_yield"])
     prof = factors.factor_profile(fundamental_conn, AS_OF, cfg)
-    assert prof.loc["T6", "n_metrics"] < prof.loc["T1", "n_metrics"] == 7
+    assert prof.loc["T6", "n_metrics"] < prof.loc["T1", "n_metrics"] == 8  # 7 + size
 
 
 def test_composite_orders_universe(fundamental_conn):
@@ -118,8 +118,9 @@ def test_completeness_shrinks_partial_data_composite(tmp_path):
     finally:
         c.close()
 
-    # BANK has value + momentum + low_vol but no quality/profitability -> 3 of 5 groups.
-    assert prof.loc["BANK", "completeness"] == pytest.approx(0.6)
+    # BANK has value + momentum + low_vol + size but no quality/profitability -> 4 of 6 groups
+    # (size is always measurable, so it counts toward completeness).
+    assert prof.loc["BANK", "completeness"] == pytest.approx(4 / 6)
     assert prof.loc["GOOD", "completeness"] == pytest.approx(1.0)
     # The shrinkage formula holds exactly, and a fully-measured name is unchanged.
     for t in ("BANK", "GOOD"):
@@ -173,6 +174,32 @@ def test_momentum_direction(price_conn):
     assert raw.loc["UP_CALM", "momentum_12_1"] > 0 > raw.loc["DN_WILD", "momentum_12_1"]
     ranks = factors.percentile_ranks(raw)
     assert ranks["momentum_12_1"].idxmax() == "UP_CALM"
+
+
+def test_size_factor_ranks_smaller_higher(tmp_path):
+    # The size factor tilts toward smaller names: the smallest market cap gets the HIGHEST size rank
+    # (a hidden-gem tilt), and it feeds the composite as a 6th group.
+    c = storage.connect(Config(data_dir=tmp_path))
+    storage.load_table(c, _flat_prices(["SMALL", "MID", "BIG"]), "prices")
+    fund = _annual([  # market cap = shares * price(10): 1e9 / 1e10 / 1e11
+        {"ticker": "SMALL", "net_income": 1e8, "total_equity": 1e9, "gross_profit": 5e8,
+         "total_assets": 1e10, "shares_outstanding": 1e8},
+        {"ticker": "MID", "net_income": 1e8, "total_equity": 1e9, "gross_profit": 5e8,
+         "total_assets": 1e10, "shares_outstanding": 1e9},
+        {"ticker": "BIG", "net_income": 1e8, "total_equity": 1e9, "gross_profit": 5e8,
+         "total_assets": 1e10, "shares_outstanding": 1e10},
+    ])
+    storage.load_table(c, fund, "fundamentals")
+    cfg = Config(data_dir="/unused")
+    try:
+        raw = factors.compute_raw_metrics(c, AS_OF, cfg)
+        ranks = factors.percentile_ranks(raw)
+        prof = factors.factor_profile(c, AS_OF, cfg)
+    finally:
+        c.close()
+    assert ranks.loc["SMALL", "size"] == pytest.approx(100.0)     # smallest -> most attractive
+    assert ranks.loc["BIG", "size"] == pytest.approx(100.0 / 3)   # largest -> lowest
+    assert "size" in prof.columns and prof.loc["SMALL", "size"] > prof.loc["BIG", "size"]
 
 
 def test_low_volatility_is_inverted(price_conn):

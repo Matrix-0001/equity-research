@@ -20,7 +20,7 @@ surface caveats. It never produces a number of its own and never overrides a com
 ## Stack & environment
 - Python 3.12 at `%LOCALAPPDATA%\Programs\Python\Python312`; project venv at `.venv`.
 - DuckDB + Parquet for local storage (`./data`, git-ignored). pandas/pyarrow.
-- Run tests: `.venv\Scripts\python -m pytest -q`  (currently **172/172 green**).
+- Run tests: `.venv\Scripts\python -m pytest -q`  (currently **173/173 green**).
 - Optional LLM: `pip install -e .[llm]` + `ANTHROPIC_API_KEY` (default model `claude-opus-4-8`,
   override `EQR_LLM_MODEL`). Without it, narratives read "Not estimated".
 
@@ -92,7 +92,10 @@ pushes (only if green).
 - `universe.py` — `backtest_universe` (full, delisted-incl.) vs `screening_universe` (liquid floor;
   returns empty if prices/fundamentals tables are absent) vs `survivorship_universe` (PIT index
   membership from `index_membership`, delisted names included). market cap = shares × last price.
-- `factors.py` — value/quality/profitability/momentum/low-vol as within-universe percentile ranks.
+- `factors.py` — value/quality/profitability/momentum/low-vol/**size** (smaller=higher; a hidden-gem
+  tilt -- caveated as weak/decayed standalone, earns its place only with value+quality) as
+  within-universe percentile ranks. **Composite is completeness-shrunk** toward neutral 50 by the
+  unmeasured-group fraction, so sparse-data names (banks/REITs) can't top the screen on a partial profile.
 - `valuation.py` — reverse-DCF *implied* growth (range over discount rates) + relative multiples vs peers.
 - `flags.py` — Piotroski F, Altman Z, Beneish M (scores + components + missing-list).
 - `report.py` — assembles the full `SecurityReport` from the above.
