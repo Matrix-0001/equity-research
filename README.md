@@ -1,8 +1,24 @@
-# Local Equity Research & Portfolio Analysis Platform
+# Equity Research & Portfolio Platform
 
-A local, fully-auditable research platform that screens, values, risk-assesses, and helps
-construct diversified long-horizon (5–20 year) portfolios with **point-in-time-correct,
-reproducible logic**. It is a **decision-support tool — not an oracle, and not financial advice.**
+Point-in-time stock research and portfolio construction for long-horizon investing, written in Python.
+It runs locally, every number can be audited, and it is **not financial advice**.
+
+**At a glance**
+- **Data (all free):** SEC EDGAR as-reported fundamentals keyed by filing date, FRED/ALFRED macro
+  vintages, and daily prices for about 1,500 US companies (S&P 1500), stored in DuckDB.
+- **Research:** six-factor screening (value, quality, profitability, momentum, low volatility, size),
+  reverse-DCF valuation reported as ranges, and accounting flags (Piotroski F, Altman Z, Beneish M).
+- **Portfolios:** inverse-variance, risk parity (ERC) and hierarchical risk parity, with joint
+  position, sector and liquidity caps.
+- **Backtesting:** a walk-forward engine that includes trading costs, market impact and tax. It reports
+  Probabilistic and Deflated Sharpe ratios, regime stress results (dot-com, GFC, COVID, 2022) and a locked
+  out-of-sample test.
+- **Interfaces:** a command-line tool and a Plotly Dash web app (screen, company, portfolio and backtest views).
+- **Tests:** 200+ pytest tests, including checks that no result uses data before it was published.
+
+**Quick start:** `pip install -e ".[ui,dev]"`, then `python -m equity_research.cli --help`,
+`python -m equity_research.ui` (http://127.0.0.1:8050) or `python -m pytest -q`.
+Copy `.env.example` to `.env` for the optional API keys.
 
 > **PERSISTENT DISCLAIMER**
 > This is a research tool, not investment advice. It does not make recommendations.
@@ -28,7 +44,7 @@ Markets are assumed mostly efficient; durable edges are rare, narrow, and decay 
    multiple-testing correction (deflated Sharpe) whenever many strategies/params are compared.
 
 ## Build order (validate each phase before the next)
-- **Phase 0 — Data honesty (current).** [Data Inventory & Honesty Report](docs/phase0_data_inventory.md).
+- **Phase 0 — Data honesty.** [Data Inventory & Honesty Report](docs/phase0_data_inventory.md).
   *No modeling code until a data lane is chosen and its limits accepted in writing.*
 - **v1** — Screening + transparent valuation (reverse-DCF & relative, as ranges) + accounting-quality
   flags (Piotroski F, Altman Z, Beneish M — as flags, not predictions).
